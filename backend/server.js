@@ -3,7 +3,7 @@
  * 
  * Manages playlist state and broadcasts updates to connected clients
  * Serves frontend files via HTTP
- * Integrates media scanner, persistence, and CasparCG control
+ * Integrates media scanner, persistence, CasparCG control, and autoplay
  */
 
 const WebSocket = require('ws');
@@ -580,200 +580,13 @@ wss.on('connection', (ws, req) => {
     sendPlaylist(ws, 'PLAYLIST_FULL');
     sendMediaLibrary(ws);
 
-    ws.on('message', (data) => {
-        handleMessage(ws, data);
-    });
-
-    ws.on('close', () => {
-        console.log(`[WS] Client disconnected from ${clientIp}`);
-    });
-
-    ws.on('error', (error) => {
-        console.error('[WS] Client error:', error.message);
-    });
-});
-
-// Server error handler
-wss.on('error', (error) => {
-    type: 'PLAYLIST_UPDATED',
-        data: playlist.getScheduled()
-});
-    } catch (error) {
-    console.error('[PLAYLIST] Error clearing playlist:', error.message);
-    throw error;
-}
-}
-
-/**
- * Handle CONNECT_CASPAR message
- */
-async function handleConnectCaspar() {
-    try {
-        await initializeCaspar();
-        broadcast({
-            type: 'CASPAR_STATUS',
-            data: { connected: casparConnected }
-        });
-    } catch (error) {
-        console.error('[CASPAR] Connection error:', error.message);
-    }
-}
-
-/**
- * Handle IMPORT_XML message
- */
-async function handleImportXML(data) {
-    try {
-        console.log(`[XML] Importing playlist from: ${data.xmlPath}`);
-
-        const result = await parseXMLPlaylist(data.xmlPath);
-        playlist.setItems(result.items);
-
-        console.log(`[XML] Imported ${result.items.length} items`);
-
-        await autoSavePlaylist();
-
-        broadcast({
-            type: 'PLAYLIST_UPDATED',
-            data: playlist.getScheduled()
-        });
-
-        broadcast({
-            type: 'INFO',
-            data: { message: `Imported ${result.items.length} items from ${result.source}` }
-        });
-    } catch (error) {
-        console.error('[XML] Import failed:', error.message);
-        broadcast({
-            type: 'ERROR',
-            data: { message: `XML import failed: ${error.message}` }
-        });
-    }
-}
-
-/**
- * Handle PLAY_ITEM message
- */
-async function handlePlayItem(data) {
-    try {
-        if (!casparConnected) {
-            console.log('[CASPAR] Not connected, attempting to connect...');
-            await initializeCaspar();
-        }
-
-        if (!casparConnected) {
-            throw new Error('CasparCG not connected');
-        }
-
-        console.log(`[CASPAR] Playing: ${data.file}`);
-
-        // Remove file extension for CasparCG
-        const fileName = data.file.replace(/\.[^/.]+$/, '');
-
-        await casparClient.play(CASPAR_CHANNEL, CASPAR_LAYER, fileName);
-
-        console.log(`[CASPAR] Now playing: ${fileName}`);
-
-        broadcast({
-            type: 'PLAYBACK_STATUS',
-            data: {
-                itemId: data.id,
-                status: 'playing',
-                file: data.file
-            }
-        });
-    } catch (error) {
-        console.error('[CASPAR] Play failed:', error.message);
-        broadcast({
-            type: 'ERROR',
-            data: { message: `Playback failed: ${error.message}` }
-        });
-    }
-}
-
-/**
- * Handle STOP_PLAYBACK message
- */
-async function handleStopPlayback(data) {
-    try {
-        if (!casparConnected) {
-            throw new Error('CasparCG not connected');
-        }
-
-        console.log(`[CASPAR] Stopping playback on ${CASPAR_CHANNEL}-${CASPAR_LAYER}`);
-
-        await casparClient.stop(CASPAR_CHANNEL, CASPAR_LAYER);
-
-        console.log('[CASPAR] Playback stopped');
-
-        broadcast({
-            type: 'PLAYBACK_STATUS',
-            data: {
-                itemId: null,
-                status: 'stopped'
-            }
-        });
-    } catch (error) {
-        console.error('[CASPAR] Stop failed:', error.message);
-        broadcast({
-            type: 'ERROR',
-            data: { message: `Stop failed: ${error.message}` }
-        });
-    }
-}
-
-/**
- * Handle SET_AUTOPLAY_MODE message
- */
-function handleSetAutoplayMode(data) {
-    try {
-        if (!autoplayScheduler) {
-            throw new Error('Autoplay scheduler not initialized');
-        }
-
-        autoplayScheduler.setMode(data.mode);
-        console.log(`[AUTOPLAY] Mode changed to: ${data.mode}`);
-
-        broadcast({
-            type: 'AUTOPLAY_STATUS',
-            data: autoplayScheduler.getStatus()
-        });
-    } catch (error) {
-        console.error('[AUTOPLAY] Set mode failed:', error.message);
-        broadcast({
-            type: 'ERROR',
-            data: { message: `Autoplay mode change failed: ${error.message}` }
-        });
-    }
-}
-
-/**
- * Handle GET_AUTOPLAY_STATUS message
- */
-function handleGetAutoplayStatus(ws) {
-    try {
-        if (!autoplayScheduler) {
-            throw new Error('Autoplay scheduler not initialized');
-        }
-
+    // Send autoplay status if available
+    if (autoplayScheduler) {
         ws.send(JSON.stringify({
             type: 'AUTOPLAY_STATUS',
             data: autoplayScheduler.getStatus()
         }));
-
-        console.log('[AUTOPLAY] Sent status to client');
-    } catch (error) {
-        console.error('[AUTOPLAY] Get status failed:', error.message);
     }
-}
-
-// WebSocket connection handler
-wss.on('connection', (ws, req) => {
-    const clientIp = req.socket.remoteAddress;
-    console.log(`[WS] New client connected from ${clientIp}`);
-
-    sendPlaylist(ws, 'PLAYLIST_FULL');
-    sendMediaLibrary(ws);
 
     ws.on('message', (data) => {
         handleMessage(ws, data);
