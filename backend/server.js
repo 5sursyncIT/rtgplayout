@@ -16,6 +16,8 @@ const { loadPlaylist, savePlaylist } = require('./utils/persistence');
 const { parseXMLPlaylist } = require('./utils/xmlParser');
 const CasparClient = require('./caspar/casparClient');
 const AutoplayScheduler = require('./scheduler/autoplayScheduler');
+const logger = require('./utils/logger');
+const ErrorHandler = require('./utils/errorHandler');
 
 const WS_PORT = 8080;
 const HTTP_PORT = 3000;
@@ -40,6 +42,9 @@ let casparConnected = false;
 
 // Autoplay scheduler instance
 let autoplayScheduler = null;
+
+// Error handler instance
+let errorHandler = null;
 
 // Get local IP address
 function getLocalIP() {
@@ -100,9 +105,9 @@ const httpServer = http.createServer((req, res) => {
 });
 
 httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
-    console.log(`[HTTP] Frontend server running on:`);
-    console.log(`       http://localhost:${HTTP_PORT}`);
-    console.log(`       http://${localIP}:${HTTP_PORT}`);
+    logger.info(`[HTTP] Frontend server running on:`);
+    logger.info(`       http://localhost:${HTTP_PORT}`);
+    logger.info(`       http://${localIP}:${HTTP_PORT}`);
 });
 
 // Create WebSocket server
@@ -111,9 +116,9 @@ const wss = new WebSocket.Server({
     host: '0.0.0.0'
 });
 
-console.log(`[WS] WebSocket server running on:`);
-console.log(`     ws://localhost:${WS_PORT}`);
-console.log(`     ws://${localIP}:${WS_PORT}`);
+logger.info(`[WS] WebSocket server running on:`);
+logger.info(`     ws://localhost:${WS_PORT}`);
+logger.info(`     ws://${localIP}:${WS_PORT}`);
 
 // Initialize playlist from saved data
 async function initializePlaylist() {
@@ -124,18 +129,18 @@ async function initializePlaylist() {
         if (savedPlaylist.baseStartAt) {
             playlist.setBaseStartAt(savedPlaylist.baseStartAt);
         }
-        console.log(`[PLAYLIST] Loaded ${savedPlaylist.items.length} items from saved playlist`);
+        logger.info(`[PLAYLIST] Loaded ${savedPlaylist.items.length} items from saved playlist`);
     } else {
         playlist.setBaseStartAt(null);
-        console.log('[PLAYLIST] No saved playlist found, starting with empty playlist');
+        logger.info('[PLAYLIST] No saved playlist found, starting with empty playlist');
     }
 }
 
 // Initialize media library (quick scan)
 async function initializeMediaLibrary() {
-    console.log('[MEDIA] Performing quick scan of media directory...');
+    logger.info('[MEDIA] Performing quick scan of media directory...');
     mediaLibrary = await scanMediaDirectoryQuick();
-    console.log(`[MEDIA] Quick scan complete: ${mediaLibrary.length} files found`);
+    logger.info(`[MEDIA] Quick scan complete: ${mediaLibrary.length} files found`);
 }
 
 // Initialize CasparCG connection
@@ -145,11 +150,11 @@ async function initializeCaspar() {
     try {
         await casparClient.connect();
         const version = await casparClient.version();
-        console.log(`[CASPAR] Connected successfully: ${version}`);
+        logger.info(`[CASPAR] Connected successfully: ${version}`);
         casparConnected = true;
     } catch (error) {
-        console.error('[CASPAR] Connection failed:', error.message);
-        console.log('[CASPAR] Will retry on first PLAY command');
+        logger.error('[CASPAR] Connection failed:', error.message);
+        logger.info('[CASPAR] Will retry on first PLAY command');
         casparConnected = false;
     }
 }
@@ -174,7 +179,10 @@ function broadcast(message) {
         }
     });
 
-    console.log(`[WS] Broadcast to ${sentCount} client(s): ${message.type}`);
+    // Don't log every broadcast to avoid clutter, only important ones
+    if (message.type !== 'PLAYBACK_STATUS' && message.type !== 'AUTOPLAY_STATUS') {
+        logger.info(`[WS] Broadcast to ${sentCount} client(s): ${message.type}`);
+    }
 }
 
 /**
@@ -188,7 +196,7 @@ function sendPlaylist(ws, type = 'PLAYLIST_FULL') {
     };
 
     ws.send(JSON.stringify(message));
-    console.log(`[WS] Sent ${type} to client`);
+    logger.info(`[WS] Sent ${type} to client`);
 }
 
 /**
@@ -204,7 +212,7 @@ function sendMediaLibrary(ws) {
     };
 
     ws.send(JSON.stringify(message));
-    console.log(`[WS] Sent MEDIA_LIBRARY to client (${mediaLibrary.length} files)`);
+    logger.info(`[WS] Sent MEDIA_LIBRARY to client (${mediaLibrary.length} files)`);
 }
 
 /**
@@ -213,7 +221,7 @@ function sendMediaLibrary(ws) {
 function handleMessage(ws, data) {
     try {
         const message = JSON.parse(data);
-        console.log(`[WS] Received: ${message.type}`);
+        logger.info(`[WS] Received: ${message.type}`);
 
         switch (message.type) {
             case 'ADD_ITEM':
@@ -222,6 +230,10 @@ function handleMessage(ws, data) {
 
             case 'REMOVE_ITEM':
                 handleRemoveItem(message.data);
+                break;
+
+            case 'REORDER_PLAYLIST':
+                handleReorderPlaylist(message.data);
                 break;
 
             case 'SET_BASE_START':
@@ -269,14 +281,14 @@ function handleMessage(ws, data) {
                 break;
 
             default:
-                console.warn(`[WS] Unknown message type: ${message.type}`);
+                logger.warn(`[WS] Unknown message type: ${message.type}`);
                 ws.send(JSON.stringify({
                     type: 'ERROR',
                     data: { message: `Unknown message type: ${message.type}` }
                 }));
         }
     } catch (error) {
-        console.error('[WS] Error handling message:', error.message);
+        logger.error('[WS] Error handling message:', error.message);
         ws.send(JSON.stringify({
             type: 'ERROR',
             data: { message: error.message }
@@ -290,7 +302,7 @@ function handleMessage(ws, data) {
 async function handleAddItem(data) {
     try {
         const item = playlist.addItem(data);
-        console.log(`[PLAYLIST] Item added: ${item.name}`);
+        logger.info(`[PLAYLIST] Item added: ${item.name}`);
 
         await autoSavePlaylist();
 
@@ -299,7 +311,7 @@ async function handleAddItem(data) {
             data: playlist.getScheduled()
         });
     } catch (error) {
-        console.error('[PLAYLIST] Error adding item:', error.message);
+        logger.error('[PLAYLIST] Error adding item:', error.message);
         throw error;
     }
 }
@@ -312,7 +324,7 @@ async function handleRemoveItem(data) {
         const removed = playlist.removeItem(data.id);
 
         if (removed) {
-            console.log(`[PLAYLIST] Item removed: ${data.id}`);
+            logger.info(`[PLAYLIST] Item removed: ${data.id}`);
 
             await autoSavePlaylist();
 
@@ -322,7 +334,31 @@ async function handleRemoveItem(data) {
             });
         }
     } catch (error) {
-        console.error('[PLAYLIST] Error removing item:', error.message);
+        logger.error('[PLAYLIST] Error removing item:', error.message);
+        throw error;
+    }
+}
+
+/**
+ * Handle REORDER_PLAYLIST message
+ */
+async function handleReorderPlaylist(data) {
+    try {
+        const { fromIndex, toIndex } = data;
+        const success = playlist.reorderItems(fromIndex, toIndex);
+
+        if (success) {
+            logger.info(`[PLAYLIST] Items reordered: ${fromIndex} -> ${toIndex}`);
+
+            await autoSavePlaylist();
+
+            broadcast({
+                type: 'PLAYLIST_UPDATED',
+                data: playlist.getScheduled()
+            });
+        }
+    } catch (error) {
+        logger.error('[PLAYLIST] Error reordering items:', error.message);
         throw error;
     }
 }
@@ -333,7 +369,7 @@ async function handleRemoveItem(data) {
 async function handleSetBaseStart(data) {
     try {
         playlist.setBaseStartAt(data.isoDate);
-        console.log(`[PLAYLIST] Base start time updated`);
+        logger.info(`[PLAYLIST] Base start time updated`);
 
         await autoSavePlaylist();
 
@@ -342,7 +378,7 @@ async function handleSetBaseStart(data) {
             data: playlist.getScheduled()
         });
     } catch (error) {
-        console.error('[PLAYLIST] Error setting base start:', error.message);
+        logger.error('[PLAYLIST] Error setting base start:', error.message);
         throw error;
     }
 }
@@ -360,7 +396,7 @@ async function handleScanMedia(ws) {
     }
 
     isScanning = true;
-    console.log('[MEDIA] Starting full media scan with FFprobe...');
+    logger.info('[MEDIA] Starting full media scan with FFprobe...');
 
     broadcast({
         type: 'SCAN_STARTED',
@@ -369,7 +405,7 @@ async function handleScanMedia(ws) {
 
     try {
         mediaLibrary = await scanMediaDirectory();
-        console.log(`[MEDIA] Full scan complete: ${mediaLibrary.length} files`);
+        logger.info(`[MEDIA] Full scan complete: ${mediaLibrary.length} files`);
 
         broadcast({
             type: 'MEDIA_LIBRARY',
@@ -379,7 +415,7 @@ async function handleScanMedia(ws) {
             }
         });
     } catch (error) {
-        console.error('[MEDIA] Error during scan:', error.message);
+        logger.error('[MEDIA] Error during scan:', error.message);
         broadcast({
             type: 'ERROR',
             data: { message: 'Media scan failed: ' + error.message }
@@ -395,7 +431,7 @@ async function handleScanMedia(ws) {
 async function handleClearPlaylist() {
     try {
         playlist.setItems([]);
-        console.log('[PLAYLIST] Playlist cleared');
+        logger.info('[PLAYLIST] Playlist cleared');
 
         await autoSavePlaylist();
 
@@ -404,7 +440,7 @@ async function handleClearPlaylist() {
             data: playlist.getScheduled()
         });
     } catch (error) {
-        console.error('[PLAYLIST] Error clearing playlist:', error.message);
+        logger.error('[PLAYLIST] Error clearing playlist:', error.message);
         throw error;
     }
 }
@@ -420,7 +456,7 @@ async function handleConnectCaspar() {
             data: { connected: casparConnected }
         });
     } catch (error) {
-        console.error('[CASPAR] Connection error:', error.message);
+        logger.error('[CASPAR] Connection error:', error.message);
     }
 }
 
@@ -429,12 +465,12 @@ async function handleConnectCaspar() {
  */
 async function handleImportXML(data) {
     try {
-        console.log(`[XML] Importing playlist from: ${data.xmlPath}`);
+        logger.info(`[XML] Importing playlist from: ${data.xmlPath}`);
 
         const result = await parseXMLPlaylist(data.xmlPath);
         playlist.setItems(result.items);
 
-        console.log(`[XML] Imported ${result.items.length} items`);
+        logger.info(`[XML] Imported ${result.items.length} items`);
 
         await autoSavePlaylist();
 
@@ -448,7 +484,7 @@ async function handleImportXML(data) {
             data: { message: `Imported ${result.items.length} items from ${result.source}` }
         });
     } catch (error) {
-        console.error('[XML] Import failed:', error.message);
+        logger.error('[XML] Import failed:', error.message);
         broadcast({
             type: 'ERROR',
             data: { message: `XML import failed: ${error.message}` }
@@ -462,7 +498,7 @@ async function handleImportXML(data) {
 async function handlePlayItem(data) {
     try {
         if (!casparConnected) {
-            console.log('[CASPAR] Not connected, attempting to connect...');
+            logger.info('[CASPAR] Not connected, attempting to connect...');
             await initializeCaspar();
         }
 
@@ -470,14 +506,30 @@ async function handlePlayItem(data) {
             throw new Error('CasparCG not connected');
         }
 
-        console.log(`[CASPAR] Playing: ${data.file}`);
+        logger.info(`[CASPAR] Playing: ${data.file}`);
 
         // Remove file extension for CasparCG
         const fileName = data.file.replace(/\.[^/.]+$/, '');
 
         await casparClient.play(CASPAR_CHANNEL, CASPAR_LAYER, fileName);
 
-        console.log(`[CASPAR] Now playing: ${fileName}`);
+        logger.info(`[CASPAR] Now playing: ${fileName}`);
+
+        // Reset retry count for this item if playback succeeds
+        if (errorHandler) {
+            errorHandler.resetRetries(data.id);
+        }
+
+        // Sync autoplay scheduler state
+        if (autoplayScheduler) {
+            autoplayScheduler.syncState(data.id);
+
+            // Broadcast updated autoplay status (for next item display)
+            broadcast({
+                type: 'AUTOPLAY_STATUS',
+                data: autoplayScheduler.getStatus()
+            });
+        }
 
         broadcast({
             type: 'PLAYBACK_STATUS',
@@ -488,11 +540,21 @@ async function handlePlayItem(data) {
             }
         });
     } catch (error) {
-        console.error('[CASPAR] Play failed:', error.message);
-        broadcast({
-            type: 'ERROR',
-            data: { message: `Playback failed: ${error.message}` }
-        });
+        logger.error('[CASPAR] Play failed:', error.message);
+
+        // Use ErrorHandler for retry/fallback
+        if (errorHandler) {
+            // Find item in playlist to pass full item object
+            const item = playlist.getItem(data.id);
+            if (item) {
+                await errorHandler.handlePlayError(error, item, CASPAR_CHANNEL, CASPAR_LAYER);
+            }
+        } else {
+            broadcast({
+                type: 'ERROR',
+                data: { message: `Playback failed: ${error.message}` }
+            });
+        }
     }
 }
 
@@ -505,11 +567,22 @@ async function handleStopPlayback(data) {
             throw new Error('CasparCG not connected');
         }
 
-        console.log(`[CASPAR] Stopping playback on ${CASPAR_CHANNEL}-${CASPAR_LAYER}`);
+        logger.info(`[CASPAR] Stopping playback on ${CASPAR_CHANNEL}-${CASPAR_LAYER}`);
 
         await casparClient.stop(CASPAR_CHANNEL, CASPAR_LAYER);
 
-        console.log('[CASPAR] Playback stopped');
+        logger.info('[CASPAR] Playback stopped');
+
+        // Sync autoplay scheduler state
+        if (autoplayScheduler) {
+            // This will reset current item and stop polling
+            autoplayScheduler.stopPlayback();
+
+            broadcast({
+                type: 'AUTOPLAY_STATUS',
+                data: autoplayScheduler.getStatus()
+            });
+        }
 
         broadcast({
             type: 'PLAYBACK_STATUS',
@@ -519,7 +592,7 @@ async function handleStopPlayback(data) {
             }
         });
     } catch (error) {
-        console.error('[CASPAR] Stop failed:', error.message);
+        logger.error('[CASPAR] Stop failed:', error.message);
         broadcast({
             type: 'ERROR',
             data: { message: `Stop failed: ${error.message}` }
@@ -537,14 +610,14 @@ function handleSetAutoplayMode(data) {
         }
 
         autoplayScheduler.setMode(data.mode);
-        console.log(`[AUTOPLAY] Mode changed to: ${data.mode}`);
+        logger.info(`[AUTOPLAY] Mode changed to: ${data.mode}`);
 
         broadcast({
             type: 'AUTOPLAY_STATUS',
             data: autoplayScheduler.getStatus()
         });
     } catch (error) {
-        console.error('[AUTOPLAY] Set mode failed:', error.message);
+        logger.error('[AUTOPLAY] Set mode failed:', error.message);
         broadcast({
             type: 'ERROR',
             data: { message: `Autoplay mode change failed: ${error.message}` }
@@ -566,16 +639,16 @@ function handleGetAutoplayStatus(ws) {
             data: autoplayScheduler.getStatus()
         }));
 
-        console.log('[AUTOPLAY] Sent status to client');
+        logger.info('[AUTOPLAY] Sent status to client');
     } catch (error) {
-        console.error('[AUTOPLAY] Get status failed:', error.message);
+        logger.error('[AUTOPLAY] Get status failed:', error.message);
     }
 }
 
 // WebSocket connection handler
 wss.on('connection', (ws, req) => {
     const clientIp = req.socket.remoteAddress;
-    console.log(`[WS] New client connected from ${clientIp}`);
+    logger.info(`[WS] New client connected from ${clientIp}`);
 
     sendPlaylist(ws, 'PLAYLIST_FULL');
     sendMediaLibrary(ws);
@@ -593,17 +666,17 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
-        console.log(`[WS] Client disconnected from ${clientIp}`);
+        logger.info(`[WS] Client disconnected from ${clientIp}`);
     });
 
     ws.on('error', (error) => {
-        console.error('[WS] Client error:', error.message);
+        logger.error('[WS] Client error:', error.message);
     });
 });
 
 // Server error handler
 wss.on('error', (error) => {
-    console.error('[WS] Server error:', error.message);
+    logger.error('[WS] Server error:', error.message);
 });
 
 // Initialize server
@@ -612,10 +685,14 @@ async function startServer() {
     await initializeMediaLibrary();
     await initializeCaspar();
 
+    // Initialize error handler
+    errorHandler = new ErrorHandler(casparClient, broadcast);
+    logger.info('[ERROR] Error handler initialized');
+
     // Initialize autoplay scheduler
     autoplayScheduler = new AutoplayScheduler(casparClient, playlist, broadcast);
     autoplayScheduler.start();
-    console.log('[AUTOPLAY] Scheduler initialized in MANUAL mode');
+    logger.info('[AUTOPLAY] Scheduler initialized in MANUAL mode');
 
     console.log('\n========================================');
     console.log('RTG PLAYOUT SERVER READY');
@@ -625,10 +702,10 @@ async function startServer() {
     console.log(`CasparCG: ${casparConnected ? '✓ Connected' : '✗ Not connected'}`);
     console.log(`Autoplay: ${autoplayScheduler.getMode()}`);
     console.log('========================================\n');
-    console.log('[WS] Waiting for client connections...');
+    logger.info('[WS] Waiting for client connections...');
 }
 
 startServer().catch(error => {
-    console.error('[SERVER] Fatal error during startup:', error);
+    logger.error('[SERVER] Fatal error during startup:', error);
     process.exit(1);
 });

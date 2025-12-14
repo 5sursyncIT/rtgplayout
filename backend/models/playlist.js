@@ -91,6 +91,27 @@ class PlaylistModel {
     }
 
     /**
+     * Reorder items in the playlist
+     * 
+     * @param {number} fromIndex - Original index
+     * @param {number} toIndex - New index
+     * @returns {boolean} - True if successful
+     */
+    reorderItems(fromIndex, toIndex) {
+        if (fromIndex < 0 || fromIndex >= this.items.length ||
+            toIndex < 0 || toIndex >= this.items.length) {
+            console.warn(`[PLAYLIST] Invalid reorder indices: ${fromIndex} -> ${toIndex}`);
+            return false;
+        }
+
+        const [movedItem] = this.items.splice(fromIndex, 1);
+        this.items.splice(toIndex, 0, movedItem);
+
+        console.log(`[PLAYLIST] Reordered item ${fromIndex} to ${toIndex}`);
+        return true;
+    }
+
+    /**
      * Get the playlist with calculated start/end times
      * 
      * @returns {Object} - Playlist with scheduled items

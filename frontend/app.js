@@ -44,7 +44,11 @@ const autoModeBtn = document.getElementById('autoModeBtn');
 const modeText = document.getElementById('modeText');
 const nextItemInfo = document.getElementById('nextItemInfo');
 const nextItemName = document.getElementById('nextItemName');
+const nextItemDuration = document.getElementById('nextItemDuration');
 const nextCountdown = document.getElementById('nextCountdown');
+
+// Notification container
+const notificationContainer = document.getElementById('notificationContainer');
 
 // Add item form
 const addItemBtn = document.getElementById('addItemBtn');
@@ -144,6 +148,10 @@ function handleMessage(message) {
             handleAutoplayStatus(message.data);
             break;
 
+        case 'NOTIFICATION':
+            showNotification(message.data.level, message.data.message);
+            break;
+
         case 'INFO':
             console.log('[INFO]', message.data.message);
             alert(message.data.message);
@@ -231,7 +239,7 @@ function renderMediaLibrary() {
         item.dataset.duration = media.durationSeconds;
 
         const duration = media.durationSeconds > 0
-            ? formatDuration(media.durationSeconds)
+            ? safeFormatDuration(media.durationSeconds)
             : '--:--:--';
 
         item.innerHTML = `
@@ -242,7 +250,7 @@ function renderMediaLibrary() {
       </div>
     `;
 
-        item.addEventListener('dragstart', handleDragStart);
+        item.addEventListener('dragstart', handleMediaDragStart);
         item.addEventListener('click', () => addMediaToPlaylist(media));
 
         mediaListEl.appendChild(item);
@@ -274,6 +282,14 @@ function renderPlaylist(data) {
 
         const row = document.createElement('tr');
         row.dataset.itemId = item.id;
+        row.dataset.index = index;
+        row.draggable = true;
+
+        // Add drag events
+        row.addEventListener('dragstart', handlePlaylistDragStart);
+        row.addEventListener('dragover', handleDragOver);
+        row.addEventListener('drop', handleDrop);
+        row.addEventListener('dragleave', handleDragLeave);
 
         const isPlaying = item.id === currentlyPlaying;
         if (isPlaying) {
@@ -284,7 +300,7 @@ function renderPlaylist(data) {
       <td class="col-index">${index + 1}</td>
       <td class="col-name">${escapeHtml(item.name)}</td>
       <td class="col-file">${escapeHtml(item.file)}</td>
-      <td class="col-duration">${formatDuration(item.durationSeconds)}</td>
+      <td class="col-duration">${safeFormatDuration(item.durationSeconds)}</td>
       <td class="col-start">${formatTime(item.startAt)}</td>
       <td class="col-end">${formatTime(item.endAt)}</td>
       <td class="col-play">
@@ -303,7 +319,9 @@ function renderPlaylist(data) {
         playlistBodyEl.appendChild(row);
     });
 
-    totalDurationEl.textContent = formatDuration(totalSeconds);
+
+
+    totalDurationEl.textContent = safeFormatDuration(totalSeconds);
 
     if (data.items.length > 0) {
         const lastItem = data.items[data.items.length - 1];
@@ -312,15 +330,94 @@ function renderPlaylist(data) {
 }
 
 /**
- * Handle drag start
+ * Handle media drag start
  */
-function handleDragStart(e) {
+function handleMediaDragStart(e) {
     e.dataTransfer.effectAllowed = 'copy';
     e.dataTransfer.setData('application/json', JSON.stringify({
+        type: 'MEDIA_ITEM',
         name: e.target.dataset.name,
         file: e.target.dataset.file,
         durationSeconds: parseInt(e.target.dataset.duration)
     }));
+    e.target.classList.add('dragging');
+}
+
+/**
+ * Handle playlist item drag start
+ */
+function handlePlaylistDragStart(e) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/json', JSON.stringify({
+        type: 'PLAYLIST_ITEM',
+        index: parseInt(e.target.dataset.index)
+    }));
+    e.target.classList.add('dragging');
+}
+
+/**
+ * Handle drag over (allow drop)
+ */
+function handleDragOver(e) {
+    e.preventDefault();
+    const row = e.target.closest('tr');
+    if (row) {
+        row.classList.add('drag-over');
+    }
+}
+
+/**
+ * Handle drag leave
+ */
+function handleDragLeave(e) {
+    const row = e.target.closest('tr');
+    if (row) {
+        row.classList.remove('drag-over');
+    }
+}
+
+/**
+ * Handle drop
+ */
+function handleDrop(e) {
+    e.preventDefault();
+    const row = e.target.closest('tr');
+
+    // Remove visual feedback
+    document.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+
+    if (!row) return;
+
+    try {
+        const data = JSON.parse(e.dataTransfer.getData('application/json'));
+
+        if (data.type === 'MEDIA_ITEM') {
+            // Add new item from media library
+            // For now, just add to end (or we could implement insert at position later)
+            addMediaToPlaylist(data);
+        } else if (data.type === 'PLAYLIST_ITEM') {
+            // Reorder playlist item
+            const fromIndex = data.index;
+            const toIndex = parseInt(row.dataset.index);
+
+            if (fromIndex !== toIndex) {
+                reorderPlaylist(fromIndex, toIndex);
+            }
+        }
+    } catch (error) {
+        console.error('Drop error:', error);
+    }
+}
+
+/**
+ * Reorder playlist items
+ */
+function reorderPlaylist(fromIndex, toIndex) {
+    sendMessage({
+        type: 'REORDER_PLAYLIST',
+        data: { fromIndex, toIndex }
+    });
 }
 
 /**
@@ -446,7 +543,19 @@ function addItem() {
 /**
  * Format duration in seconds to HH:MM:SS
  */
-function formatDuration(seconds) {
+/**
+ * Format duration in seconds to HH:MM:SS
+ */
+function safeFormatDuration(secondsInput) {
+    // Force conversion to number
+    const seconds = parseInt(secondsInput, 10);
+
+    // console.log('[DEBUG] safeFormatDuration input:', secondsInput, 'parsed:', seconds, 'type:', typeof seconds);
+
+    if (isNaN(seconds)) {
+        return '--:--:--';
+    }
+
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const secs = Math.floor(seconds % 60);
@@ -506,6 +615,7 @@ function handleAutoplayStatus(data) {
     autoplayMode = data.mode;
     nextItem = data.nextItem;
 
+    console.log('[DEBUG] handleAutoplayStatus data:', JSON.stringify(data, null, 2));
     console.log('[AUTOPLAY] Status update:', data);
 
     // Update UI
@@ -513,7 +623,7 @@ function handleAutoplayStatus(data) {
     updateNextItemInfo(data.nextItem);
 
     // Start/stop countdown
-    if (data.mode === 'AUTO' && data.nextItem) {
+    if (data.nextItem) {
         startCountdown(data.nextItem.startAt);
     } else {
         stopCountdown();
@@ -543,8 +653,13 @@ function updateModeButton(mode) {
 function updateNextItemInfo(item) {
     if (!nextItemInfo) return;
 
+    console.log('[DEBUG] updateNextItemInfo item:', item);
+
     if (item) {
         nextItemName.textContent = item.name;
+        if (nextItemDuration) {
+            nextItemDuration.textContent = `(${safeFormatDuration(item.durationSeconds)})`;
+        }
         nextItemInfo.style.display = 'flex';
     } else {
         nextItemInfo.style.display = 'none';

@@ -74,6 +74,30 @@ class AutoplayScheduler {
     }
 
     /**
+     * Sync scheduler state with manual playback
+     */
+    syncState(itemId) {
+        const scheduled = this.playlist.getScheduled();
+        if (!scheduled || !scheduled.items) return;
+
+        const index = scheduled.items.findIndex(item => item.id === itemId);
+
+        if (index !== -1) {
+            this.currentItemId = itemId;
+            this.currentIndex = index;
+
+            // If in AUTO mode, ensure polling is active
+            if (this.mode === 'AUTO') {
+                this.startStatusPolling();
+            }
+
+            console.log(`[AUTOPLAY] Synced state to item index ${index}: ${itemId}`);
+        } else {
+            console.warn(`[AUTOPLAY] Could not sync state: item ${itemId} not found in playlist`);
+        }
+    }
+
+    /**
      * Check if any item should be played now
      */
     checkSchedule() {
@@ -269,7 +293,7 @@ class AutoplayScheduler {
             return true;
         }
 
-        // Check for paused state at end
+        // Check for paused state at end (CasparCG often pauses at the last frame)
         if (infoResponse.includes('<paused>true</paused>')) {
             // Additional check: if time equals duration
             const timeMatch = infoResponse.match(/<time>([^<]+)<\/time>/);
@@ -279,11 +303,16 @@ class AutoplayScheduler {
                 const time = parseFloat(timeMatch[1]);
                 const duration = parseFloat(durationMatch[1]);
 
-                // If within 1 frame of end
-                if (Math.abs(time - duration) < 0.05) {
+                // If within 0.1s of end or past end
+                if (Math.abs(time - duration) < 0.1 || time >= duration) {
                     return true;
                 }
             }
+        }
+
+        // Check for empty layer (sometimes happens)
+        if (infoResponse.includes('<layer>10</layer>') && !infoResponse.includes('<foreground>')) {
+            return true;
         }
 
         return false;
@@ -321,6 +350,10 @@ class AutoplayScheduler {
         const currentItem = this.getCurrentItem();
         const nextItem = this.getNextItem();
 
+        if (nextItem) {
+            console.log('[DEBUG] getStatus nextItem:', JSON.stringify(nextItem, null, 2));
+        }
+
         return {
             mode: this.mode,
             currentItem: currentItem ? {
@@ -333,7 +366,8 @@ class AutoplayScheduler {
                 id: nextItem.id,
                 name: nextItem.name,
                 file: nextItem.file,
-                startAt: nextItem.startAt
+                startAt: nextItem.startAt,
+                durationSeconds: nextItem.durationSeconds
             } : null
         };
     }
