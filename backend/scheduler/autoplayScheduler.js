@@ -24,6 +24,8 @@ class AutoplayScheduler {
 
         this.CASPAR_CHANNEL = 1;
         this.CASPAR_LAYER = 10;
+
+        this.lastPlayTime = 0;
     }
 
     /**
@@ -98,6 +100,52 @@ class AutoplayScheduler {
     }
 
     /**
+     * Recover state from CasparCG (e.g. after restart)
+     */
+    async recoverState() {
+        try {
+            console.log('[AUTOPLAY] Attempting to recover state from CasparCG...');
+            const response = await this.casparClient.info(this.CASPAR_CHANNEL);
+            console.log('[AUTOPLAY] Raw CasparCG INFO response:', response);
+
+            // Extract file name from response
+            // <file>name_of_file</file>
+            const fileMatch = response.match(/<file>([^<]+)<\/file>/);
+
+            if (fileMatch && fileMatch[1]) {
+                const playingFile = fileMatch[1];
+                console.log(`[AUTOPLAY] CasparCG is playing: ${playingFile}`);
+
+                // Find in playlist (ignoring extension differences if needed)
+                const scheduled = this.playlist.getScheduled();
+                if (!scheduled || !scheduled.items) return;
+
+                // Normalize for comparison (remove extension, lowercase)
+                const normalize = (str) => str.replace(/\.[^/.]+$/, '').toLowerCase();
+                const normalizedPlaying = normalize(playingFile);
+
+                const foundItem = scheduled.items.find(item =>
+                    normalize(item.file) === normalizedPlaying
+                );
+
+                if (foundItem) {
+                    console.log(`[AUTOPLAY] Found matching item in playlist: ${foundItem.name}`);
+                    this.syncState(foundItem.id);
+
+                    // Also start polling to detect when it finishes
+                    this.startStatusPolling();
+                } else {
+                    console.log('[AUTOPLAY] Playing file not found in current playlist');
+                }
+            } else {
+                console.log('[AUTOPLAY] CasparCG is not playing any file');
+            }
+        } catch (error) {
+            console.error('[AUTOPLAY] State recovery failed:', error.message);
+        }
+    }
+
+    /**
      * Check if any item should be played now
      */
     checkSchedule() {
@@ -158,6 +206,7 @@ class AutoplayScheduler {
 
             this.currentItemId = item.id;
             this.currentIndex = index;
+            this.lastPlayTime = Date.now();
 
             // Broadcast status
             this.broadcast({
@@ -265,6 +314,9 @@ class AutoplayScheduler {
      */
     async checkPlaybackStatus() {
         try {
+            // Don't check if we just started playing (give it 2 seconds)
+            if (Date.now() - this.lastPlayTime < 2000) return;
+
             const response = await this.casparClient.info(this.CASPAR_CHANNEL);
 
             if (this.isFinished(response)) {
@@ -279,43 +331,65 @@ class AutoplayScheduler {
     /**
      * Determine if playback is finished based on INFO response
      */
-    isFinished(infoResponse) {
-        // CasparCG INFO returns XML
-        // When foreground is empty, playback is finished
+    /**
+     * Check if current video is finished based on CasparCG info
+     */
+    isFinished(data) {
+        if (!data) return false;
 
-        // Check for empty foreground
-        if (infoResponse.includes('<foreground></foreground>')) {
-            return true;
-        }
+        try {
+            // 1. Check if layer 10 exists
+            if (!data.includes(`<layer_${this.CASPAR_LAYER}>`)) {
+                return true;
+            }
 
-        // Check if no file is playing
-        if (!infoResponse.includes('<file>')) {
-            return true;
-        }
+            // 2. Extract layer 10 content
+            const layerMatch = data.match(new RegExp(`<layer_${this.CASPAR_LAYER}>([\\s\\S]*?)<\\/layer_${this.CASPAR_LAYER}>`));
+            if (!layerMatch) return true;
 
-        // Check for paused state at end (CasparCG often pauses at the last frame)
-        if (infoResponse.includes('<paused>true</paused>')) {
-            // Additional check: if time equals duration
-            const timeMatch = infoResponse.match(/<time>([^<]+)<\/time>/);
-            const durationMatch = infoResponse.match(/<duration>([^<]+)<\/duration>/);
+            const layerContent = layerMatch[1];
 
-            if (timeMatch && durationMatch) {
-                const time = parseFloat(timeMatch[1]);
-                const duration = parseFloat(durationMatch[1]);
+            // 3. Check foreground
+            const foregroundMatch = layerContent.match(/<foreground>([\s\S]*?)<\/foreground>/);
+            if (!foregroundMatch) return true;
 
-                // If within 0.1s of end or past end
-                if (Math.abs(time - duration) < 0.1 || time >= duration) {
-                    return true;
+            const foregroundContent = foregroundMatch[1];
+
+            // 4. Check producer
+            if (foregroundContent.includes('<producer>empty</producer>')) {
+                return true;
+            }
+
+            // 5. If ffmpeg, check duration
+            if (foregroundContent.includes('<producer>ffmpeg</producer>')) {
+                const timeMatch = foregroundContent.match(/<time>([^<]+)<\/time>/);
+
+                // Try to find duration in <duration> or second <clip>
+                let duration = 0;
+                const explicitDurationMatch = foregroundContent.match(/<duration>([^<]+)<\/duration>/);
+                const clipMatches = foregroundContent.match(/<clip>([^<]+)<\/clip>/g);
+
+                if (explicitDurationMatch) {
+                    duration = parseFloat(explicitDurationMatch[1]);
+                } else if (clipMatches && clipMatches.length >= 2) {
+                    // Extract value from <clip>123.45</clip>
+                    const val = clipMatches[1].replace(/<\/?clip>/g, '');
+                    duration = parseFloat(val);
+                }
+
+                if (timeMatch && duration > 0) {
+                    const time = parseFloat(timeMatch[1]);
+                    const remaining = duration - time;
+                    return remaining <= this.timeTolerance;
                 }
             }
-        }
 
-        // Check for empty layer (sometimes happens)
-        if (infoResponse.includes('<layer>10</layer>') && !infoResponse.includes('<foreground>')) {
-            return true;
-        }
+            return false;
 
-        return false;
+        } catch (error) {
+            console.error('[AUTOPLAY] Error parsing status:', error);
+            return false;
+        }
     }
 
     /**

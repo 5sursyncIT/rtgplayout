@@ -130,6 +130,15 @@ class PlaylistModel {
     }
 
     /**
+     * Reset the schedule base time to now
+     */
+    resetSchedule() {
+        this.baseStartAt = new Date();
+        console.log('[PLAYLIST] Schedule reset to:', this.baseStartAt.toISOString());
+        return this.getScheduled();
+    }
+
+    /**
      * Get raw playlist without scheduling
      * 
      * @returns {Object} - Raw playlist data

@@ -14,6 +14,8 @@ let isScanning = false;
 
 // Playback state
 let currentlyPlaying = null;
+let currentItem = null;
+let playlistData = { items: [] };
 
 // Autoplay state
 let autoplayMode = 'MANUAL';
@@ -589,11 +591,63 @@ function escapeHtml(text) {
 }
 
 /**
- * Update current time display
+ * Update current time and offset display
  */
 function updateCurrentTime() {
     const now = new Date();
     currentTimeEl.textContent = formatTime(now.toISOString());
+
+    updateOffset(now);
+}
+
+/**
+ * Calculate and display time offset
+ */
+function updateOffset(now) {
+    const offsetEl = document.getElementById('offsetTime');
+    if (!offsetEl) return;
+
+    // Find reference time (start of current item, or start of playlist)
+    let expectedTime = null;
+
+    if (currentItem && currentItem.startAt) {
+        expectedTime = new Date(currentItem.startAt);
+    } else if (playlistData && playlistData.items && playlistData.items.length > 0) {
+        // If nothing playing, compare with first item
+        expectedTime = new Date(playlistData.items[0].startAt);
+    }
+
+    if (!expectedTime) {
+        offsetEl.textContent = '--:--:--';
+        offsetEl.className = 'time-display offset-display';
+        return;
+    }
+
+    // Calculate diff in seconds
+    const diffSeconds = (now - expectedTime) / 1000;
+    const absDiff = Math.abs(diffSeconds);
+
+    // Format diff
+    const formattedDiff = safeFormatDuration(absDiff);
+
+    // Determine status (Late = positive diff, Early = negative diff)
+    // Note: If now > expected, we are LATE (positive)
+    // If now < expected, we are EARLY (negative)
+
+    offsetEl.className = 'time-display offset-display';
+
+    if (diffSeconds > 1) {
+        // Late
+        offsetEl.textContent = `+${formattedDiff}`;
+        offsetEl.classList.add('offset-late');
+    } else if (diffSeconds < -1) {
+        // Early
+        offsetEl.textContent = `-${formattedDiff}`;
+        offsetEl.classList.add('offset-early');
+    } else {
+        // On time
+        offsetEl.textContent = `±00:00:00`;
+    }
 }
 
 /**
@@ -614,6 +668,7 @@ function toggleAutoplayMode() {
 function handleAutoplayStatus(data) {
     autoplayMode = data.mode;
     nextItem = data.nextItem;
+    currentItem = data.currentItem; // Update global variable
 
     console.log('[DEBUG] handleAutoplayStatus data:', JSON.stringify(data, null, 2));
     console.log('[AUTOPLAY] Status update:', data);

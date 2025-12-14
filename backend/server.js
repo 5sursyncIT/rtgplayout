@@ -703,6 +703,13 @@ async function startServer() {
     console.log(`Autoplay: ${autoplayScheduler.getMode()}`);
     console.log('========================================\n');
     logger.info('[WS] Waiting for client connections...');
+
+    // Attempt to recover state after a short delay to ensure everything is settled
+    setTimeout(() => {
+        if (autoplayScheduler) {
+            autoplayScheduler.recoverState();
+        }
+    }, 2000);
 }
 
 startServer().catch(error => {
