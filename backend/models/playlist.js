@@ -177,7 +177,8 @@ class PlaylistModel {
             file: item.file,
             durationSeconds: item.durationSeconds,
             trimInSeconds: item.trimInSeconds || 0,
-            trimOutSeconds: item.trimOutSeconds || 0
+            trimOutSeconds: item.trimOutSeconds || 0,
+            thumbnail: item.thumbnail || null
         };
     }
 }

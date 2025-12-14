@@ -10,6 +10,7 @@ const { promisify } = require('util');
 const execAsync = promisify(exec);
 
 const MEDIA_PATH = 'Z:\\nodal\\medias\\';
+const THUMBNAILS_DIR = path.join(__dirname, '../../frontend/thumbnails');
 
 // Supported video extensions
 const VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mxf', '.mpg', '.mpeg', '.mkv', '.webm'];
@@ -36,12 +37,57 @@ async function getVideoDuration(filePath) {
 }
 
 /**
+ * Ensure thumbnails directory exists
+ */
+async function ensureThumbnailsDir() {
+    try {
+        await fs.mkdir(THUMBNAILS_DIR, { recursive: true });
+    } catch (error) {
+        console.error('[SCANNER] Could not create thumbnails directory:', error.message);
+    }
+}
+
+/**
+ * Generate thumbnail for video
+ * 
+ * @param {string} filePath - Absolute path to video file
+ * @param {string} fileName - File name (without extension)
+ * @returns {Promise<string>} - Relative path to thumbnail
+ */
+async function generateThumbnail(filePath, fileName) {
+    const thumbnailName = `${fileName}.jpg`;
+    const thumbnailPath = path.join(THUMBNAILS_DIR, thumbnailName);
+    const relativePath = `/thumbnails/${thumbnailName}`;
+
+    try {
+        // Check if thumbnail already exists
+        try {
+            await fs.access(thumbnailPath);
+            return relativePath;
+        } catch (e) {
+            // Does not exist, generate it
+        }
+
+        const ffmpegPath = 'C:\\SERVER\\ffmpeg.exe';
+        // Take screenshot at 5 seconds, scale to 320px width
+        const command = `"${ffmpegPath}" -y -i "${filePath}" -ss 00:00:05 -vframes 1 -vf scale=320:-1 "${thumbnailPath}"`;
+
+        await execAsync(command);
+        return relativePath;
+    } catch (error) {
+        console.warn(`[SCANNER] Could not generate thumbnail for ${fileName}:`, error.message);
+        return null;
+    }
+}
+
+/**
  * Scan media directory for video files
  * 
  * @returns {Promise<Array>} - Array of media file objects
  */
 async function scanMediaDirectory() {
     console.log(`[SCANNER] Scanning media directory: ${MEDIA_PATH}`);
+    await ensureThumbnailsDir();
 
     try {
         const files = await fs.readdir(MEDIA_PATH);
@@ -63,13 +109,17 @@ async function scanMediaDirectory() {
                 // Get duration (this can be slow, so we'll do it in batches)
                 const duration = await getVideoDuration(filePath);
 
+                // Generate thumbnail
+                const thumbnail = await generateThumbnail(filePath, path.basename(file, ext));
+
                 mediaFiles.push({
                     name: path.basename(file, ext), // Name without extension
                     file: file,                     // Full filename
                     path: filePath,                 // Absolute path
                     size: stats.size,               // File size in bytes
                     durationSeconds: duration,      // Duration in seconds
-                    modified: stats.mtime           // Last modified date
+                    modified: stats.mtime,          // Last modified date
+                    thumbnail: thumbnail            // Path to thumbnail
                 });
 
                 console.log(`[SCANNER] Found: ${file} (${duration}s)`);
@@ -152,6 +202,7 @@ module.exports = {
     scanMediaDirectory,
     scanMediaDirectoryQuick,
     getVideoDuration,
+    generateThumbnail,
     formatFileSize,
     MEDIA_PATH
 };

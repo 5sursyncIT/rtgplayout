@@ -216,6 +216,9 @@ body {
     cursor: pointer;
     transition: all 0.2s;
     border-left: 3px solid transparent;
+    display: flex;
+    gap: 10px;
+    align-items: center;
 }
 
 .media-item:hover {
@@ -511,7 +514,9 @@ body {
         flex-direction: column;
         gap: 10px;
     }
-}/* CasparCG Controls */
+}
+
+/* CasparCG Controls */
 .col-play {
     width: 150px;
     text-align: center;
@@ -575,7 +580,9 @@ body {
 .playlist-table tr.playing .col-name {
     color: var(--accent-red);
     font-weight: 700;
-}/* Autoplay MODE Button */
+}
+
+/* Autoplay MODE Button */
 .btn-mode {
     display: flex;
     align-items: center;
@@ -638,6 +645,7 @@ body {
     color: var(--text-secondary);
     font-size: 12px;
     text-transform: uppercase;
+    letter-spacing: 1px;
 }
 
 .next-item-info .next-name {
@@ -648,4 +656,26 @@ body {
 .next-item-info .countdown {
     color: var(--text-secondary);
     font-family: 'Courier New', monospace;
+}
+
+.media-thumbnail {
+    width: 80px;
+    height: 45px;
+    object-fit: cover;
+    border-radius: 4px;
+    background: #000;
+    flex-shrink: 0;
+}
+
+.media-details {
+    flex: 1;
+    overflow: hidden;
+}
+
+.next-thumbnail {
+    width: 60px;
+    height: 34px;
+    object-fit: cover;
+    border-radius: 2px;
+    background: #000;
 }

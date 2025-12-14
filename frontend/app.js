@@ -244,11 +244,18 @@ function renderMediaLibrary() {
             ? safeFormatDuration(media.durationSeconds)
             : '--:--:--';
 
+        const thumbnailHtml = media.thumbnail
+            ? `<img src="${media.thumbnail}" class="media-thumbnail" alt="Thumbnail" onerror="this.style.display='none'">`
+            : '';
+
         item.innerHTML = `
-      <div class="media-name">${escapeHtml(media.name)}</div>
-      <div class="media-info">
-        <span class="media-duration">${duration}</span>
-        <span class="media-file">${escapeHtml(media.file)}</span>
+      ${thumbnailHtml}
+      <div class="media-details">
+        <div class="media-name">${escapeHtml(media.name)}</div>
+        <div class="media-info">
+            <span class="media-duration">${duration}</span>
+            <span class="media-file">${escapeHtml(media.file)}</span>
+        </div>
       </div>
     `;
 
@@ -436,7 +443,8 @@ function addMediaToPlaylist(media) {
         data: {
             name: media.name,
             file: media.file,
-            durationSeconds: media.durationSeconds
+            durationSeconds: media.durationSeconds,
+            thumbnail: media.thumbnail
         }
     });
 }
@@ -598,6 +606,32 @@ function updateCurrentTime() {
     currentTimeEl.textContent = formatTime(now.toISOString());
 
     updateOffset(now);
+    updateProgressBar(now);
+}
+
+/**
+ * Update progress bar
+ */
+function updateProgressBar(now) {
+    const progressBar = document.getElementById('progressBar');
+    const progressContainer = document.getElementById('progressContainer');
+
+    if (!progressBar || !progressContainer) return;
+
+    if (currentItem && currentItem.startAt) {
+        progressContainer.style.display = 'block';
+        const start = new Date(currentItem.startAt).getTime();
+        const duration = currentItem.durationSeconds * 1000;
+        const nowMs = now.getTime();
+
+        let progress = (nowMs - start) / duration * 100;
+        progress = Math.max(0, Math.min(100, progress));
+
+        progressBar.style.width = `${progress}%`;
+    } else {
+        progressContainer.style.display = 'none';
+        progressBar.style.width = '0%';
+    }
 }
 
 /**
@@ -715,6 +749,17 @@ function updateNextItemInfo(item) {
         if (nextItemDuration) {
             nextItemDuration.textContent = `(${safeFormatDuration(item.durationSeconds)})`;
         }
+
+        const thumbnailEl = document.getElementById('nextItemThumbnail');
+        if (thumbnailEl) {
+            if (item.thumbnail) {
+                thumbnailEl.src = item.thumbnail;
+                thumbnailEl.style.display = 'block';
+            } else {
+                thumbnailEl.style.display = 'none';
+            }
+        }
+
         nextItemInfo.style.display = 'flex';
     } else {
         nextItemInfo.style.display = 'none';
