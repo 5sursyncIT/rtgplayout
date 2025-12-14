@@ -1,11 +1,9 @@
 /**
  * Autoplay Scheduler - Automatic playlist playback
- *
+ * 
  * Manages automatic playback of playlist items based on scheduled times
  * Detects end of playback and automatically plays next item
  */
-
-console.log('[AUTOPLAY] *** MODULE LOADED - Version with dual <time> tag parsing and <5s protection ***');
 
 class AutoplayScheduler {
     constructor(casparClient, playlist, broadcast) {
@@ -28,7 +26,6 @@ class AutoplayScheduler {
         this.CASPAR_LAYER = 10;
 
         this.lastPlayTime = 0;
-        this.lastLogTime = 0;
     }
 
     /**
@@ -60,19 +57,14 @@ class AutoplayScheduler {
      */
     setMode(mode) {
         if (mode !== 'AUTO' && mode !== 'MANUAL') {
-            throw new Error();
+            throw new Error(`Invalid mode: ${mode}`);
         }
 
-        const previousMode = this.mode;
         this.mode = mode;
-        console.log();
+        console.log(`[AUTOPLAY] Mode set to: ${mode}`);
 
         if (mode === 'MANUAL') {
             this.stopStatusPolling();
-        } else if (mode === 'AUTO') {
-            // Check schedule immediately when activating AUTO mode
-            console.log('[AUTOPLAY] AUTO mode activated, checking schedule immediately...');
-            this.checkSchedule();
         }
     }
 
@@ -166,18 +158,12 @@ class AutoplayScheduler {
             return;
         }
 
-        // Debug log every 10 seconds (reduce spam)
-        if (!this.lastLogTime || Date.now() - this.lastLogTime > 10000) {
-            console.log(`[AUTOPLAY] Checking schedule, currentIndex: ${this.currentIndex}, items: ${scheduled.items.length}`);
-            this.lastLogTime = Date.now();
-        }
-
         // Find next item to play
         for (let i = 0; i < scheduled.items.length; i++) {
             const item = scheduled.items[i];
 
-            if (this.shouldPlay(item, now, i)) {
-                console.log(`[AUTOPLAY] ✓ Time to play: ${item.name}`);
+            if (this.shouldPlay(item, now)) {
+                console.log(`[AUTOPLAY] Time to play: ${item.name}`);
                 this.playItem(item, i);
                 break;
             }
@@ -187,35 +173,18 @@ class AutoplayScheduler {
     /**
      * Determine if item should be played now
      */
-    shouldPlay(item, now, itemIndex) {
+    shouldPlay(item, now) {
         // Already playing
         if (item.id === this.currentItemId) {
             return false;
         }
 
-        // Don't go backwards - only play items AFTER current index
-        if (this.currentIndex >= 0 && itemIndex <= this.currentIndex) {
-            return false;
-        }
-
         const startTime = new Date(item.startAt);
-        const endTime = new Date(item.endAt);
-        const nowTime = now.getTime();
+        const diffSeconds = (now - startTime) / 1000;
 
-        const diffFromStart = (nowTime - startTime.getTime()) / 1000;
-        const diffFromEnd = (endTime.getTime() - nowTime) / 1000;
-
-        // Play if within tolerance window OR if we should already be playing (catch-up)
-        const shouldStartNow = diffFromStart >= -this.TIME_TOLERANCE &&
-            diffFromStart <= this.TIME_TOLERANCE;
-        const alreadyStarted = diffFromStart > this.TIME_TOLERANCE && diffFromEnd > 0;
-
-        if (shouldStartNow || alreadyStarted) {
-            console.log('[AUTOPLAY] Item "' + item.name + '" should play: startDiff=' + diffFromStart.toFixed(1) + 's, endDiff=' + diffFromEnd.toFixed(1) + 's');
-            return true;
-        }
-
-        return false;
+        // Within tolerance window (±2 seconds)
+        return diffSeconds >= -this.TIME_TOLERANCE &&
+            diffSeconds <= this.TIME_TOLERANCE;
     }
 
     /**
@@ -366,24 +335,17 @@ class AutoplayScheduler {
      * Check if current video is finished based on CasparCG info
      */
     isFinished(data) {
-        console.log('[DEBUG isFinished] ========== METHOD CALLED ==========');
-
-        if (!data) {
-            console.log('[DEBUG isFinished] No data, returning false');
-            return false;
-        }
+        if (!data) return false;
 
         try {
-            // 1. Extract layer content (more robust regex)
-            // Matches <layer_10> or <layer_10 ...>
-            const layerRegex = new RegExp(`<layer_${this.CASPAR_LAYER}\\b[^>]*>([\\s\\S]*?)<\\/layer_${this.CASPAR_LAYER}>`);
-            const layerMatch = data.match(layerRegex);
-
-            if (!layerMatch) {
-                console.log(`[DEBUG isFinished] Layer ${this.CASPAR_LAYER} not found in XML, returning true`);
-                // console.log('[DEBUG] XML dump:', data.substring(0, 200) + '...'); 
+            // 1. Check if layer 10 exists
+            if (!data.includes(`<layer_${this.CASPAR_LAYER}>`)) {
                 return true;
             }
+
+            // 2. Extract layer 10 content
+            const layerMatch = data.match(new RegExp(`<layer_${this.CASPAR_LAYER}>([\\s\\S]*?)<\\/layer_${this.CASPAR_LAYER}>`));
+            if (!layerMatch) return true;
 
             const layerContent = layerMatch[1];
 
@@ -400,45 +362,9 @@ class AutoplayScheduler {
 
             // 5. If ffmpeg, check duration
             if (foregroundContent.includes('<producer>ffmpeg</producer>')) {
-                // CasparCG returns TWO <time> tags: current position and total duration
-                const timeMatches = foregroundContent.match(/<time>([^<]+)<\/time>/g);
-
-                console.log('[DEBUG isFinished] timeMatches:', timeMatches);
-
-                if (timeMatches && timeMatches.length >= 2) {
-                    // Extract values from both <time> tags
-                    const currentTime = parseFloat(timeMatches[0].replace(/<\/?time>/g, ''));
-                    const totalDuration = parseFloat(timeMatches[1].replace(/<\/?time>/g, ''));
-
-                    console.log(`[DEBUG isFinished] Parsed: currentTime=${currentTime}, totalDuration=${totalDuration}`);
-
-                    if (!isNaN(currentTime) && !isNaN(totalDuration) && totalDuration > 0) {
-                        const remaining = totalDuration - currentTime;
-
-                        console.log(`[DEBUG isFinished] remaining=${remaining.toFixed(1)}s, TIME_TOLERANCE=${this.TIME_TOLERANCE}`);
-
-                        // Don't mark as finished if video just started (less than 5 seconds in)
-                        if (currentTime < 5) {
-                            console.log('[DEBUG isFinished] Video just started (<5s), returning false');
-                            return false;
-                        }
-
-                        // Video is finished if remaining time is within tolerance
-                        const isFinished = remaining <= this.TIME_TOLERANCE;
-
-                        if (isFinished) {
-                            console.log(`[AUTOPLAY] Video finishing: time=${currentTime.toFixed(1)}s, duration=${totalDuration.toFixed(1)}s, remaining=${remaining.toFixed(1)}s`);
-                        }
-
-                        console.log(`[DEBUG isFinished] Returning isFinished=${isFinished}`);
-                        return isFinished;
-                    }
-                } else {
-                    console.log('[DEBUG isFinished] timeMatches not found or insufficient, falling back to old method');
-                }
-
-                // Fallback: try old method with <duration> or <clip>
                 const timeMatch = foregroundContent.match(/<time>([^<]+)<\/time>/);
+
+                // Try to find duration in <duration> or second <clip>
                 let duration = 0;
                 const explicitDurationMatch = foregroundContent.match(/<duration>([^<]+)<\/duration>/);
                 const clipMatches = foregroundContent.match(/<clip>([^<]+)<\/clip>/g);
@@ -446,20 +372,15 @@ class AutoplayScheduler {
                 if (explicitDurationMatch) {
                     duration = parseFloat(explicitDurationMatch[1]);
                 } else if (clipMatches && clipMatches.length >= 2) {
+                    // Extract value from <clip>123.45</clip>
                     const val = clipMatches[1].replace(/<\/?clip>/g, '');
                     duration = parseFloat(val);
                 }
 
                 if (timeMatch && duration > 0) {
                     const time = parseFloat(timeMatch[1]);
-
-                    // Don't mark as finished if video just started
-                    if (time < 5) {
-                        return false;
-                    }
-
                     const remaining = duration - time;
-                    return remaining <= this.TIME_TOLERANCE;
+                    return remaining <= this.timeTolerance;
                 }
             }
 

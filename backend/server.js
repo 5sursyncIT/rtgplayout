@@ -15,7 +15,16 @@ const { scanMediaDirectoryQuick, scanMediaDirectory } = require('./utils/mediaSc
 const { loadPlaylist, savePlaylist } = require('./utils/persistence');
 const { parseXMLPlaylist } = require('./utils/xmlParser');
 const CasparClient = require('./caspar/casparClient');
+
+// Force reload of AutoplayScheduler to ensure latest code is used
+// Clear all cached modules from the scheduler directory
+Object.keys(require.cache).forEach(key => {
+    if (key.includes('scheduler')) {
+        delete require.cache[key];
+    }
+});
 const AutoplayScheduler = require('./scheduler/autoplayScheduler');
+
 const logger = require('./utils/logger');
 const ErrorHandler = require('./utils/errorHandler');
 

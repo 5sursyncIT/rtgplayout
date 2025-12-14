@@ -119,9 +119,60 @@ class CasparClient extends EventEmitter {
     /**
      * Get channel info
      */
-    async info(channel = 1) {
-        const response = await this.sendCommand(`INFO ${channel}`);
-        return response;
+    /**
+     * Get channel info (handles multi-line XML response)
+     */
+    info(channel = 1) {
+        return new Promise((resolve, reject) => {
+            if (!this.connected) {
+                return reject(new Error('Not connected to CasparCG'));
+            }
+
+            let xmlData = '';
+            let isCollecting = false;
+
+            const responseHandler = (line) => {
+                // Check for start of response
+                if (line.startsWith('201 INFO') || line.startsWith('200 INFO')) {
+                    isCollecting = true;
+                    return;
+                }
+
+                // Check for error
+                if (!isCollecting && (line.startsWith('4') || line.startsWith('5'))) {
+                    this.removeListener('response', responseHandler);
+                    reject(new Error(line));
+                    return;
+                }
+
+                // Collect data
+                if (isCollecting) {
+                    xmlData += line;
+
+                    // Check for end of XML
+                    if (line.includes('</channel>')) {
+                        this.removeListener('response', responseHandler);
+                        resolve(xmlData);
+                    }
+                }
+            };
+
+            this.on('response', responseHandler);
+
+            console.log(`[CASPAR] Sending INFO ${channel}`);
+            this.socket.write(`INFO ${channel}\r\n`);
+
+            // Timeout after 2 seconds
+            setTimeout(() => {
+                this.removeListener('response', responseHandler);
+                if (xmlData) {
+                    // Return partial data if we have some
+                    resolve(xmlData);
+                } else {
+                    reject(new Error('Info command timeout'));
+                }
+            }, 2000);
+        });
     }
 
     /**
