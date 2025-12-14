@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTG Playout - Playlist Manager</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="main-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1>RTG PLAYOUT</h1>
+                <div class="channel-info">Canal 1 - Programme Principal</div>
+            </div>
+            <div class="header-right">
+                <div class="time-display">
+                    <div class="label">Heure actuelle</div>
+                    <div class="time" id="currentTime">--:--:--</div>
+                </div>
+                <div class="time-display">
+                    <div class="label">Fin de playlist</div>
+                    <div class="time playlist-end" id="playlistEnd">--:--:--</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Connection Status -->
+        <div class="status-bar">
+            <div class="status-indicator" id="wsStatus">
+                <span class="dot"></span>
+                <span class="text">Déconnecté</span>
+            </div>
+            <div class="playlist-info">
+                <span id="itemCount">0</span> élément(s) |
+                Durée totale: <span id="totalDuration">00:00:00</span>
+            </div>
+            <div class="playlist-controls">
+                <button id="stopPlaybackBtn" class="btn-stop btn-small">⏹ STOP</button>
+                <button id="clearPlaylistBtn" class="btn-danger btn-small">Vider la playlist</button>
+            </div>
+        </div>
+
+        <div class="content-wrapper">
+            <!-- Media Library Panel -->
+            <aside class="media-library">
+                <div class="panel-header">
+                    <h3>Médiathèque</h3>
+                    <button id="scanBtn" class="btn-secondary btn-small">
+                        <span id="scanBtnText">Scanner</span>
+                    </button>
+                </div>
+                <div class="media-count">
+                    <span id="mediaCount">0</span> fichier(s)
+                </div>
+                <div id="mediaList" class="media-list">
+                    <!-- Media items will be inserted here -->
+                </div>
+            </aside>
+
+            <!-- Playlist Section -->
+            <main class="playlist-section">
+                <div class="playlist-container">
+                    <table class="playlist-table">
+                        <thead>
+                            <tr>
+                                <th class="col-index">#</th>
+                                <th class="col-name">Nom</th>
+                                <th class="col-file">Fichier</th>
+                                <th class="col-duration">Durée</th>
+                                <th class="col-start">Début prévu</th>
+                                <th class="col-end">Fin prévue</th>
+                                <th class="col-play">Lecture</th>
+                                <th class="col-actions">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="playlistBody">
+                            <!-- Playlist items will be inserted here -->
+                        </tbody>
+                    </table>
+                    <div id="emptyPlaylist" class="empty-state">
+                        <p>La playlist est vide</p>
+                        <p class="hint">Glissez des fichiers depuis la médiathèque ou utilisez le formulaire ci-dessous
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Add Item Form (for testing) -->
+                <div class="add-item-panel">
+                    <h3>Ajouter un élément manuellement</h3>
+                    <div class="form-row">
+                        <input type="text" id="itemName" placeholder="Nom" value="">
+                        <input type="text" id="itemFile" placeholder="Fichier" value="">
+                        <input type="number" id="itemDuration" placeholder="Durée (s)" value="" min="1">
+                        <button id="addItemBtn" class="btn-primary">Ajouter</button>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
