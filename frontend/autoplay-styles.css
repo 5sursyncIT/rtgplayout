@@ -1,0 +1,74 @@
+/* Autoplay MODE Button */
+.btn-mode {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border: 2px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-panel);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.btn-mode.mode-auto {
+    background: var(--accent-green);
+    border-color: var(--accent-green);
+    color: white;
+    animation: pulse-auto 2s infinite;
+}
+
+.btn-mode.mode-manual {
+    background: var(--bg-panel);
+    border-color: var(--border-color);
+}
+
+.btn-mode:hover {
+    transform: scale(1.05);
+}
+
+@keyframes pulse-auto {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.7;
+    }
+}
+
+.mode-icon {
+    font-size: 18px;
+}
+
+/* Next Item Info */
+.next-item-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 15px;
+    background: rgba(6, 214, 160, 0.1);
+    border-left: 3px solid var(--accent-green);
+    border-radius: 4px;
+}
+
+.next-item-info .label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-transform: uppercase;
+}
+
+.next-item-info .next-name {
+    color: var(--accent-green);
+    font-weight: 700;
+}
+
+.next-item-info .countdown {
+    color: var(--text-secondary);
+    font-family: 'Courier New', monospace;
+}

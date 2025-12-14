@@ -15,6 +15,11 @@ let isScanning = false;
 // Playback state
 let currentlyPlaying = null;
 
+// Autoplay state
+let autoplayMode = 'MANUAL';
+let nextItem = null;
+let countdownInterval = null;
+
 // DOM elements
 const currentTimeEl = document.getElementById('currentTime');
 const playlistEndEl = document.getElementById('playlistEnd');
@@ -33,6 +38,13 @@ const scanBtnText = document.getElementById('scanBtnText');
 // Control buttons
 const clearPlaylistBtn = document.getElementById('clearPlaylistBtn');
 const stopPlaybackBtn = document.getElementById('stopPlaybackBtn');
+
+// Autoplay elements
+const autoModeBtn = document.getElementById('autoModeBtn');
+const modeText = document.getElementById('modeText');
+const nextItemInfo = document.getElementById('nextItemInfo');
+const nextItemName = document.getElementById('nextItemName');
+const nextCountdown = document.getElementById('nextCountdown');
 
 // Add item form
 const addItemBtn = document.getElementById('addItemBtn');
@@ -126,6 +138,10 @@ function handleMessage(message) {
 
         case 'PLAYBACK_STATUS':
             handlePlaybackStatus(message.data);
+            break;
+
+        case 'AUTOPLAY_STATUS':
+            handleAutoplayStatus(message.data);
             break;
 
         case 'INFO':
@@ -471,11 +487,111 @@ function updateCurrentTime() {
     currentTimeEl.textContent = formatTime(now.toISOString());
 }
 
+/**
+ * Toggle autoplay mode
+ */
+function toggleAutoplayMode() {
+    const newMode = autoplayMode === 'AUTO' ? 'MANUAL' : 'AUTO';
+
+    sendMessage({
+        type: 'SET_AUTOPLAY_MODE',
+        data: { mode: newMode }
+    });
+}
+
+/**
+ * Handle autoplay status update
+ */
+function handleAutoplayStatus(data) {
+    autoplayMode = data.mode;
+    nextItem = data.nextItem;
+
+    console.log('[AUTOPLAY] Status update:', data);
+
+    // Update UI
+    updateModeButton(data.mode);
+    updateNextItemInfo(data.nextItem);
+
+    // Start/stop countdown
+    if (data.mode === 'AUTO' && data.nextItem) {
+        startCountdown(data.nextItem.startAt);
+    } else {
+        stopCountdown();
+    }
+}
+
+/**
+ * Update mode button appearance
+ */
+function updateModeButton(mode) {
+    if (!autoModeBtn) return;
+
+    modeText.textContent = mode;
+
+    if (mode === 'AUTO') {
+        autoModeBtn.classList.add('mode-auto');
+        autoModeBtn.classList.remove('mode-manual');
+    } else {
+        autoModeBtn.classList.add('mode-manual');
+        autoModeBtn.classList.remove('mode-auto');
+    }
+}
+
+/**
+ * Update next item info display
+ */
+function updateNextItemInfo(item) {
+    if (!nextItemInfo) return;
+
+    if (item) {
+        nextItemName.textContent = item.name;
+        nextItemInfo.style.display = 'flex';
+    } else {
+        nextItemInfo.style.display = 'none';
+    }
+}
+
+/**
+ * Start countdown timer
+ */
+function startCountdown(startAt) {
+    stopCountdown();
+
+    countdownInterval = setInterval(() => {
+        const now = new Date();
+        const start = new Date(startAt);
+        const diff = Math.max(0, (start - now) / 1000);
+
+        const minutes = Math.floor(diff / 60);
+        const seconds = Math.floor(diff % 60);
+
+        if (nextCountdown) {
+            nextCountdown.textContent =
+                `dans ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+
+        if (diff <= 0) {
+            stopCountdown();
+        }
+    }, 1000);
+}
+
+/**
+ * Stop countdown timer
+ */
+function stopCountdown() {
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+        countdownInterval = null;
+    }
+}
+
 // Event listeners
 addItemBtn.addEventListener('click', addItem);
 scanBtn.addEventListener('click', scanMedia);
 clearPlaylistBtn.addEventListener('click', clearPlaylist);
 stopPlaybackBtn.addEventListener('click', stopPlayback);
+autoModeBtn.addEventListener('click', toggleAutoplayMode);
 
 // Allow Enter key to add item
 [itemNameInput, itemFileInput, itemDurationInput].forEach(input => {

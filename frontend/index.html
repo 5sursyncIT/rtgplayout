@@ -17,6 +17,12 @@
                 <div class="channel-info">Canal 1 - Programme Principal</div>
             </div>
             <div class="header-right">
+                <div class="autoplay-controls">
+                    <button id="autoModeBtn" class="btn-mode mode-manual">
+                        <span class="mode-icon">⏯</span>
+                        <span class="mode-text" id="modeText">MANUEL</span>
+                    </button>
+                </div>
                 <div class="time-display">
                     <div class="label">Heure actuelle</div>
                     <div class="time" id="currentTime">--:--:--</div>
@@ -37,6 +43,11 @@
             <div class="playlist-info">
                 <span id="itemCount">0</span> élément(s) |
                 Durée totale: <span id="totalDuration">00:00:00</span>
+            </div>
+            <div class="next-item-info" id="nextItemInfo" style="display: none;">
+                <span class="label">Prochain:</span>
+                <span class="next-name" id="nextItemName">--</span>
+                <span class="countdown" id="nextCountdown">dans --:--</span>
             </div>
             <div class="playlist-controls">
                 <button id="stopPlaybackBtn" class="btn-stop btn-small">⏹ STOP</button>
