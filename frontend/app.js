@@ -1305,7 +1305,7 @@ const addEventBtn = document.getElementById('addEventBtn');
 
 // Open modal
 window.openSecondaryEventsModal = function (itemId) {
-    const item = playlist.find(i => i.id === itemId);
+    const item = playlistData.items.find(i => i.id === itemId);
     if (!item) return;
 
     secondaryEventsItemId.value = itemId;
