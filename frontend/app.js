@@ -467,6 +467,9 @@ function renderPlaylist(data) {
       </td>
       <td class="col-actions">
         <button class="btn-hard-start ${item.hardStartTime ? 'active' : ''}" data-item-id="${item.id}" title="Démarrage strict">⏰</button>
+        <button class="btn-secondary btn-small btn-secondary-events" data-item-id="${item.id}" title="Événements Secondaires">⚡
+            ${(item.secondaryEvents && item.secondaryEvents.length > 0) ? `<span class="event-badge">${item.secondaryEvents.length}</span>` : ''}
+        </button>
         <button class="btn-delete" onclick="deleteItem('${item.id}')">✕</button>
       </td>
     `;
@@ -480,6 +483,15 @@ function renderPlaylist(data) {
             e.stopPropagation();
             const itemId = btn.dataset.itemId;
             openHardStartModal(itemId);
+        });
+    });
+
+    // Attach secondary events button listeners
+    document.querySelectorAll('.btn-secondary-events').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const itemId = btn.dataset.itemId;
+            openSecondaryEventsModal(itemId);
         });
     });
 
@@ -1267,6 +1279,159 @@ function renderActiveTemplates() {
         });
     });
 }
+
+/**
+ * ========================================
+ * SECONDARY EVENTS MANAGEMENT
+ * ========================================
+ */
+
+// Modal elements
+const secondaryEventsModal = document.getElementById('secondaryEventsModal');
+const closeSecondaryEventsModal = document.getElementById('closeSecondaryEventsModal');
+const closeSecondaryEventsBtn = document.getElementById('closeSecondaryEventsBtn');
+const secondaryEventsItemId = document.getElementById('secondaryEventsItemId');
+const eventsList = document.getElementById('eventsList');
+
+// Form elements
+const eventTypeInput = document.getElementById('eventTypeInput');
+const eventTriggerInput = document.getElementById('eventTriggerInput');
+const eventOffsetInput = document.getElementById('eventOffsetInput');
+const eventLayerInput = document.getElementById('eventLayerInput');
+const eventTemplateInput = document.getElementById('eventTemplateInput');
+const eventDataInput = document.getElementById('eventDataInput');
+const eventTemplateOptions = document.getElementById('eventTemplateOptions');
+const addEventBtn = document.getElementById('addEventBtn');
+
+// Open modal
+window.openSecondaryEventsModal = function (itemId) {
+    const item = playlist.find(i => i.id === itemId);
+    if (!item) return;
+
+    secondaryEventsItemId.value = itemId;
+    renderSecondaryEvents(item.secondaryEvents || []);
+    
+    // Populate templates dropdown from main dropdown
+    if (eventTemplateInput.options.length === 0) {
+        Array.from(templateNameEl.options).forEach(opt => {
+            if (opt.value) {
+                const newOpt = document.createElement('option');
+                newOpt.value = opt.value;
+                newOpt.textContent = opt.textContent;
+                eventTemplateInput.appendChild(newOpt);
+            }
+        });
+    }
+
+    // Reset form
+    eventTypeInput.value = 'CG_ADD';
+    eventTriggerInput.value = 'START';
+    eventOffsetInput.value = '0';
+    eventLayerInput.value = '20';
+    eventDataInput.value = '';
+    updateEventFormVisibility();
+
+    secondaryEventsModal.style.display = 'flex';
+};
+
+// Render events list
+function renderSecondaryEvents(events) {
+    if (!events || events.length === 0) {
+        eventsList.innerHTML = '<div class="empty-state-small">Aucun événement configuré</div>';
+        return;
+    }
+
+    eventsList.innerHTML = events.map(evt => {
+        let details = `Trigger: ${evt.trigger} ${evt.offsetMs >= 0 ? '+' : ''}${evt.offsetMs}ms | Layer: ${evt.layer}`;
+        if (evt.type === 'CG_ADD') details += ` | Tpl: ${evt.template.split('/').pop()}`;
+
+        return `
+            <div class="event-item type-${evt.type}">
+                <div class="event-info">
+                    <div class="event-title">${evt.type}</div>
+                    <div class="event-details">${details}</div>
+                </div>
+                <button class="event-delete" onclick="removeSecondaryEvent('${evt.id}')">🗑️</button>
+            </div>
+        `;
+    }).join('');
+}
+
+// Update form visibility based on type
+function updateEventFormVisibility() {
+    const type = eventTypeInput.value;
+    if (type === 'CG_ADD') {
+        eventTemplateOptions.style.display = 'block';
+    } else {
+        eventTemplateOptions.style.display = 'none';
+    }
+}
+
+eventTypeInput.addEventListener('change', updateEventFormVisibility);
+
+// Add event handler
+addEventBtn.addEventListener('click', () => {
+    const itemId = secondaryEventsItemId.value;
+    const type = eventTypeInput.value;
+    const trigger = eventTriggerInput.value;
+    const offsetMs = parseInt(eventOffsetInput.value) || 0;
+    const layer = parseInt(eventLayerInput.value) || 20;
+
+    const event = {
+        type,
+        trigger,
+        offsetMs,
+        layer
+    };
+
+    if (type === 'CG_ADD') {
+        const template = eventTemplateInput.value;
+        if (!template) {
+            alert('Veuillez sélectionner un template');
+            return;
+        }
+        event.template = template;
+
+        try {
+            const dataStr = eventDataInput.value.trim();
+            event.data = dataStr ? JSON.parse(dataStr) : {};
+        } catch (e) {
+            alert('JSON invalide');
+            return;
+        }
+    }
+
+    // Send to server
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'SECONDARY_EVENT_ADD',
+            data: { itemId, event }
+        }));
+    }
+});
+
+// Remove event handler
+window.removeSecondaryEvent = function (eventId) {
+    const itemId = secondaryEventsItemId.value;
+    if (confirm('Supprimer cet événement ?')) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'SECONDARY_EVENT_REMOVE',
+                data: { itemId, eventId }
+            }));
+        }
+    }
+};
+
+// Close modal handlers
+closeSecondaryEventsModal.addEventListener('click', () => secondaryEventsModal.style.display = 'none');
+closeSecondaryEventsBtn.addEventListener('click', () => secondaryEventsModal.style.display = 'none');
+
+/**
+ * ========================================
+ * END SECONDARY EVENTS MANAGEMENT
+ * ========================================
+ */
 
 /**
  * Request presets and active templates from server

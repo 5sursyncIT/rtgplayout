@@ -269,6 +269,85 @@
         </div>
     </div>
 
+    <!-- Secondary Events Modal -->
+    <div id="secondaryEventsModal" class="modal" style="display: none;">
+        <div class="modal-content large-modal">
+            <div class="modal-header">
+                <h3>Événements Secondaires</h3>
+                <button class="modal-close" id="closeSecondaryEventsModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-info">Gérer les événements graphiques (logos, titres) associés à cet élément.</p>
+
+                <div class="events-container">
+                    <!-- List of existing events -->
+                    <div class="events-list-section">
+                        <h4>Événements configurés</h4>
+                        <div id="eventsList" class="events-list">
+                            <!-- Items will be injected here -->
+                            <div class="empty-state-small">Aucun événement configuré</div>
+                        </div>
+                    </div>
+
+                    <!-- Add New Event Form -->
+                    <div class="event-form-section">
+                        <h4>Ajouter un événement</h4>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Type</label>
+                                <select id="eventTypeInput" class="form-control">
+                                    <option value="CG_ADD">Afficher Graphique (CG_ADD)</option>
+                                    <option value="CG_STOP">Masquer Graphique (CG_STOP)</option>
+                                    <option value="CG_CLEAR">Effacer Layer (CG_CLEAR)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Déclencheur</label>
+                                <select id="eventTriggerInput" class="form-control">
+                                    <option value="START">Début du clip (START)</option>
+                                    <option value="END">Fin du clip (END)</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Décalage (ms)</label>
+                                <input type="number" id="eventOffsetInput" class="form-control" value="0" min="0" step="100">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label>Layer CasparCG</label>
+                                <input type="number" id="eventLayerInput" class="form-control" value="20" min="10" max="100">
+                            </div>
+                        </div>
+
+                        <!-- Template options (only for CG_ADD) -->
+                        <div id="eventTemplateOptions" class="template-options">
+                            <div class="form-group">
+                                <label>Template</label>
+                                <select id="eventTemplateInput" class="form-control">
+                                    <!-- Options populated from JS -->
+                                </select>
+                            </div>
+                            
+                            <div class="form-group full-width">
+                                <label>Données (JSON)</label>
+                                <textarea id="eventDataInput" class="form-control" rows="3" placeholder='{"text": "Exemple"}'></textarea>
+                            </div>
+                        </div>
+
+                        <button id="addEventBtn" class="btn-secondary full-width" style="margin-top: 10px;">+ Ajouter l'événement</button>
+                    </div>
+                </div>
+
+                <input type="hidden" id="secondaryEventsItemId" value="">
+            </div>
+            <div class="modal-footer">
+                <button id="closeSecondaryEventsBtn" class="btn-primary">Fermer</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Create/Edit Folder Modal -->
     <div id="folderModal" class="modal" style="display: none;">
         <div class="modal-content">
