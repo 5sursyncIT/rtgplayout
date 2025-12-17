@@ -208,6 +208,86 @@ class CasparClient extends EventEmitter {
     }
 
     /**
+     * CG ADD - Load a template
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     * @param {number} flashLayer - Flash layer (0 for HTML templates)
+     * @param {string} templateName - Template path (e.g., "rtg-lower-third/index")
+     * @param {boolean} playOnLoad - Auto-play on load
+     * @param {string} data - JSON data string
+     */
+    async cgAdd(channel, layer, flashLayer, templateName, playOnLoad, data) {
+        const playFlag = playOnLoad ? '1' : '0';
+        const dataParam = data ? ` "${this.escapeString(data)}"` : '';
+        const command = `CG ${channel}-${layer} ADD ${flashLayer} "${templateName}" ${playFlag}${dataParam}`;
+        const response = await this.sendCommand(command);
+        return response;
+    }
+
+    /**
+     * CG PLAY - Play a template (show with animation)
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     * @param {number} flashLayer - Flash layer (0 for HTML templates)
+     */
+    async cgPlay(channel, layer, flashLayer) {
+        const response = await this.sendCommand(`CG ${channel}-${layer} PLAY ${flashLayer}`);
+        return response;
+    }
+
+    /**
+     * CG STOP - Stop a template (hide with animation)
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     * @param {number} flashLayer - Flash layer (0 for HTML templates)
+     */
+    async cgStop(channel, layer, flashLayer) {
+        const response = await this.sendCommand(`CG ${channel}-${layer} STOP ${flashLayer}`);
+        return response;
+    }
+
+    /**
+     * CG UPDATE - Update template data without replaying
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     * @param {number} flashLayer - Flash layer (0 for HTML templates)
+     * @param {string} data - JSON data string
+     */
+    async cgUpdate(channel, layer, flashLayer, data) {
+        const command = `CG ${channel}-${layer} UPDATE ${flashLayer} "${this.escapeString(data)}"`;
+        const response = await this.sendCommand(command);
+        return response;
+    }
+
+    /**
+     * CG CLEAR - Remove all templates from layer
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     */
+    async cgClear(channel, layer) {
+        const response = await this.sendCommand(`CG ${channel}-${layer} CLEAR`);
+        return response;
+    }
+
+    /**
+     * CG REMOVE - Remove specific template
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     * @param {number} flashLayer - Flash layer (0 for HTML templates)
+     */
+    async cgRemove(channel, layer, flashLayer) {
+        const response = await this.sendCommand(`CG ${channel}-${layer} REMOVE ${flashLayer}`);
+        return response;
+    }
+
+    /**
+     * Escape quotes in string for AMCP
+     */
+    escapeString(str) {
+        return str.replace(/"/g, '\\"');
+    }
+
+    /**
      * Disconnect from CasparCG
      */
     disconnect() {

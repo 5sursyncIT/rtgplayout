@@ -152,8 +152,111 @@ class PlaylistModel {
     }
 
     /**
+     * Recalculate schedule with hard start time constraints
+     * Adjusts previous item durations if needed to respect hard start times
+     * @returns {Object} - Result object with success status and errors
+     */
+    recalculateWithHardStart() {
+        // Find items with hard start times
+        const hardStartItems = this.items
+            .map((item, index) => ({ item, index }))
+            .filter(({ item }) => item.hardStartTime);
+
+        if (hardStartItems.length === 0) {
+            return { success: true, errors: [] };
+        }
+
+        const errors = [];
+
+        // For each item with hard start time
+        hardStartItems.forEach(({ item, index }) => {
+            if (index === 0) {
+                errors.push({
+                    itemId: item.id,
+                    itemName: item.name,
+                    reason: 'Cannot apply hard start to first item'
+                });
+                return;
+            }
+
+            // Parse hard start time (HH:MM:SS)
+            const [hours, minutes, seconds] = item.hardStartTime.split(':').map(Number);
+
+            // Calculate scheduled start time of current item first
+            const baseDate = this.baseStartAt || new Date();
+            let cumulativeSeconds = 0;
+            for (let i = 0; i < index; i++) {
+                cumulativeSeconds += this.items[i].durationSeconds;
+            }
+            const scheduledStart = new Date(baseDate.getTime() + cumulativeSeconds * 1000);
+
+            // Create target start based on scheduled date (not current date)
+            const targetStart = new Date(scheduledStart);
+            targetStart.setHours(hours, minutes, seconds || 0, 0);
+
+            // Calculate difference
+            // If target is more than 12 hours away, assume day wrap
+            // e.g. Sched 23:50, Target 00:10 -> Diff is -23h40m -> Add day to target -> Diff +20m
+            // e.g. Sched 00:10, Target 23:50 -> Diff is +23h40m -> Subtract day from target -> Diff -20m
+            
+            let timeDiffSeconds = (targetStart - scheduledStart) / 1000;
+
+            if (timeDiffSeconds > 12 * 3600) {
+                targetStart.setDate(targetStart.getDate() - 1);
+                timeDiffSeconds = (targetStart - scheduledStart) / 1000;
+            } else if (timeDiffSeconds < -12 * 3600) {
+                targetStart.setDate(targetStart.getDate() + 1);
+                timeDiffSeconds = (targetStart - scheduledStart) / 1000;
+            }
+
+            if (timeDiffSeconds < 0) {
+                // We're running late - need to trim previous item(s)
+                const trimNeeded = Math.abs(timeDiffSeconds);
+
+                // Adjust the immediately previous item
+                const prevItem = this.items[index - 1];
+                const maxTrim = prevItem.durationSeconds - 10; // Keep at least 10 seconds
+
+                if (trimNeeded <= maxTrim) {
+                    // Adjust duration by setting trimOutSeconds
+                    prevItem.durationSeconds -= trimNeeded;
+                    prevItem.trimOutSeconds = (prevItem.trimOutSeconds || 0) + trimNeeded;
+                    console.log(`[HARD START] "${item.name}" @ ${item.hardStartTime}: trimmed ${Math.round(trimNeeded)}s from previous item`);
+                } else {
+                    const errorMsg = `Cannot trim ${Math.round(trimNeeded)}s from previous item (max: ${Math.round(maxTrim)}s)`;
+                    console.error(`[HARD START] "${item.name}" @ ${item.hardStartTime}: ${errorMsg}`);
+                    errors.push({
+                        itemId: item.id,
+                        itemName: item.name,
+                        hardStartTime: item.hardStartTime,
+                        reason: errorMsg,
+                        trimNeeded: Math.round(trimNeeded),
+                        maxTrim: Math.round(maxTrim)
+                    });
+                }
+            } else if (timeDiffSeconds > 0) {
+                // We're running early - extend previous item to fill the gap
+                const extendNeeded = timeDiffSeconds;
+                const prevItem = this.items[index - 1];
+                
+                // Allow extending beyond original duration (negative trimOut)
+                // This effectively creates a "hold" or "gap" after the item finishes
+                prevItem.durationSeconds += extendNeeded;
+                prevItem.trimOutSeconds = (prevItem.trimOutSeconds || 0) - extendNeeded;
+                
+                console.log(`[HARD START] "${item.name}" @ ${item.hardStartTime}: extended previous item by ${Math.round(extendNeeded)}s (added gap/hold)`);
+            }
+        });
+
+        return {
+            success: errors.length === 0,
+            errors: errors
+        };
+    }
+
+    /**
      * Validate a playlist item
-     * 
+     *
      * @private
      * @param {Object} item - Item to validate
      * @returns {Object} - Validated item
@@ -178,7 +281,8 @@ class PlaylistModel {
             durationSeconds: item.durationSeconds,
             trimInSeconds: item.trimInSeconds || 0,
             trimOutSeconds: item.trimOutSeconds || 0,
-            thumbnail: item.thumbnail || null
+            thumbnail: item.thumbnail || null,
+            hardStartTime: item.hardStartTime || null
         };
     }
 }

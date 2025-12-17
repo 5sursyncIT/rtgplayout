@@ -79,6 +79,7 @@ function connect() {
         }
 
         requestMediaLibrary();
+        requestGraphicsData();
     };
 
     ws.onmessage = (event) => {
@@ -164,6 +165,40 @@ function handleMessage(message) {
             alert(`Erreur: ${message.data.message}`);
             break;
 
+        case 'HARD_START_ERROR':
+            handleHardStartError(message.data);
+            break;
+
+        // Template/Graphics messages
+        case 'TEMPLATE_LOADED':
+        case 'TEMPLATE_PLAYING':
+        case 'TEMPLATE_STOPPED':
+        case 'TEMPLATE_UPDATED':
+        case 'TEMPLATE_REMOVED':
+            requestGraphicsData();
+            break;
+
+        case 'TEMPLATE_ACTIVE_LIST':
+            activeTemplates = message.data.templates || [];
+            renderActiveTemplates();
+            break;
+
+        case 'PRESET_SAVED':
+        case 'PRESET_DELETED':
+            // Presets will be sent via PRESET_LIST
+            break;
+
+        case 'PRESET_LIST':
+            presets = message.data.presets || [];
+            renderPresets();
+            break;
+
+        // Folder messages
+        case 'FOLDER_LIST':
+            folders = message.data.folders || [];
+            renderFolders();
+            break;
+
         default:
             console.warn('[APP] Unknown message type:', message.type);
     }
@@ -224,21 +259,52 @@ function handlePlaybackStatus(data) {
  * Render media library
  */
 function renderMediaLibrary() {
-    mediaCountEl.textContent = mediaLibrary.length;
+    // Filter media by selected folder
+    let filteredMedia = mediaLibrary;
+    if (selectedFolderId !== null) {
+        if (selectedFolderId === 1) {
+            // Special case: "Non classé" (ID: 1) shows ALL unassigned media
+            // This includes media with folderId === 1, null, undefined, or not in any other folder
+            const otherFolderIds = folders
+                .filter(f => f.id !== 1)
+                .map(f => f.id);
+
+            filteredMedia = mediaLibrary.filter(media =>
+                !media.folderId ||
+                media.folderId === 1 ||
+                !otherFolderIds.includes(media.folderId)
+            );
+        } else {
+            // Normal filtering for other folders
+            filteredMedia = mediaLibrary.filter(media => media.folderId === selectedFolderId);
+        }
+    }
+
+    console.log('[MEDIA] Total media:', mediaLibrary.length, '| Filtered:', filteredMedia.length, '| Selected folder:', selectedFolderId);
+    if (selectedFolderId !== null && filteredMedia.length === 0) {
+        console.warn('[MEDIA] No media found for folder', selectedFolderId);
+        console.log('[MEDIA] Sample media folderIds:', mediaLibrary.slice(0, 5).map(m => ({ file: m.file, folderId: m.folderId })));
+    }
+
+    mediaCountEl.textContent = filteredMedia.length;
     mediaListEl.innerHTML = '';
 
-    if (mediaLibrary.length === 0) {
-        mediaListEl.innerHTML = '<div class="empty-media">Aucun fichier trouvé</div>';
+    if (filteredMedia.length === 0) {
+        const message = selectedFolderId !== null
+            ? `<div class="empty-media">Aucun fichier dans ce dossier</div>`
+            : '<div class="empty-media">Aucun fichier trouvé</div>';
+        mediaListEl.innerHTML = message;
         return;
     }
 
-    mediaLibrary.forEach(media => {
+    filteredMedia.forEach(media => {
         const item = document.createElement('div');
         item.className = 'media-item';
         item.draggable = true;
         item.dataset.file = media.file;
         item.dataset.name = media.name;
         item.dataset.duration = media.durationSeconds;
+        item.dataset.folderId = media.folderId || 1;
 
         const duration = media.durationSeconds > 0
             ? safeFormatDuration(media.durationSeconds)
@@ -248,16 +314,28 @@ function renderMediaLibrary() {
             ? `<img src="${media.thumbnail}" class="media-thumbnail" alt="Thumbnail" onerror="this.style.display='none'">`
             : '';
 
+        // Add folder indicator
+        const folder = folders.find(f => f.id === (media.folderId || 1));
+        const folderIndicator = folder
+            ? `<div class="media-folder-badge" style="background: ${folder.color};" title="${folder.name}"></div>`
+            : '';
+
         item.innerHTML = `
       ${thumbnailHtml}
       <div class="media-details">
-        <div class="media-name">${escapeHtml(media.name)}</div>
+        <div class="media-name">${escapeHtml(media.name)} ${folderIndicator}</div>
         <div class="media-info">
             <span class="media-duration">${duration}</span>
             <span class="media-file">${escapeHtml(media.file)}</span>
         </div>
       </div>
     `;
+
+        // Right-click context menu for folder assignment
+        item.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            showMediaContextMenu(e, media);
+        });
 
         item.addEventListener('dragstart', handleMediaDragStart);
         item.addEventListener('click', () => addMediaToPlaylist(media));
@@ -267,10 +345,62 @@ function renderMediaLibrary() {
 }
 
 /**
+ * Show context menu for media item (assign to folder)
+ */
+function showMediaContextMenu(e, media) {
+    // Remove any existing context menu
+    const existing = document.querySelector('.context-menu');
+    if (existing) existing.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'context-menu';
+    menu.style.position = 'fixed';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    let menuHTML = '<div class="context-menu-title">Déplacer vers...</div>';
+    folders.forEach(folder => {
+        menuHTML += `
+            <div class="context-menu-item" data-folder-id="${folder.id}">
+                <div class="folder-color" style="background: ${folder.color}; width: 10px; height: 10px; border-radius: 50%; display: inline-block;"></div>
+                ${escapeHtml(folder.name)}
+                ${media.folderId === folder.id ? '✓' : ''}
+            </div>
+        `;
+    });
+    menu.innerHTML = menuHTML;
+
+    document.body.appendChild(menu);
+
+    // Add click handlers
+    menu.querySelectorAll('.context-menu-item').forEach(item => {
+        item.addEventListener('click', () => {
+            const folderId = parseInt(item.dataset.folderId);
+            sendFolderCommand('FOLDER_ASSIGN_MEDIA', {
+                mediaFile: media.file,
+                folderId
+            });
+            menu.remove();
+        });
+    });
+
+    // Close on click outside
+    setTimeout(() => {
+        document.addEventListener('click', function closeMenu() {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        });
+    }, 100);
+}
+
+/**
  * Render playlist to table
  */
 function renderPlaylist(data) {
     console.log('[APP] Rendering playlist:', data.items.length, 'items');
+
+    // Update global playlist data
+    playlistData = data;
 
     playlistBodyEl.innerHTML = '';
     itemCountEl.textContent = data.items.length;
@@ -305,11 +435,26 @@ function renderPlaylist(data) {
             row.classList.add('playing');
         }
 
+        // Check for hard start time
+        const hardStartIndicator = item.hardStartTime
+            ? `<div class="hard-start-indicator">
+                <span class="hard-start-icon">⏰</span>
+                <span class="hard-start-time">${item.hardStartTime}</span>
+               </div>`
+            : '';
+
         row.innerHTML = `
       <td class="col-index">${index + 1}</td>
-      <td class="col-name">${escapeHtml(item.name)}</td>
+      <td class="col-name">
+        ${escapeHtml(item.name)}
+        ${hardStartIndicator}
+      </td>
       <td class="col-file">${escapeHtml(item.file)}</td>
-      <td class="col-duration">${safeFormatDuration(item.durationSeconds)}</td>
+      <td class="col-duration">
+        ${safeFormatDuration(item.durationSeconds)}
+        ${item.trimOutSeconds > 0 ? `<span class="trim-info" title="Raccourci de ${item.trimOutSeconds}s">✂️ -${safeFormatDuration(item.trimOutSeconds)}</span>` : ''}
+        ${item.trimOutSeconds < 0 ? `<span class="gap-info" title="Prolongé de ${Math.abs(item.trimOutSeconds)}s">⏳ +${safeFormatDuration(Math.abs(item.trimOutSeconds))}</span>` : ''}
+      </td>
       <td class="col-start">${formatTime(item.startAt)}</td>
       <td class="col-end">${formatTime(item.endAt)}</td>
       <td class="col-play">
@@ -321,6 +466,7 @@ function renderPlaylist(data) {
         </span>
       </td>
       <td class="col-actions">
+        <button class="btn-hard-start ${item.hardStartTime ? 'active' : ''}" data-item-id="${item.id}" title="Démarrage strict">⏰</button>
         <button class="btn-delete" onclick="deleteItem('${item.id}')">✕</button>
       </td>
     `;
@@ -328,7 +474,14 @@ function renderPlaylist(data) {
         playlistBodyEl.appendChild(row);
     });
 
-
+    // Attach hard start button listeners
+    document.querySelectorAll('.btn-hard-start').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const itemId = btn.dataset.itemId;
+            openHardStartModal(itemId);
+        });
+    });
 
     totalDurationEl.textContent = safeFormatDuration(totalSeconds);
 
@@ -599,6 +752,32 @@ function escapeHtml(text) {
 }
 
 /**
+ * Show notification toast
+ */
+function showNotification(level, message) {
+    const notification = document.createElement('div');
+    notification.className = `notification ${level}`;
+
+    notification.innerHTML = `
+        <div class="notification-message">${escapeHtml(message)}</div>
+        <button class="notification-close">×</button>
+    `;
+
+    notificationContainer.appendChild(notification);
+
+    // Close button handler
+    const closeBtn = notification.querySelector('.notification-close');
+    closeBtn.addEventListener('click', () => {
+        notification.remove();
+    });
+
+    // Auto-remove after 5 seconds
+    setTimeout(() => {
+        notification.remove();
+    }, 5000);
+}
+
+/**
  * Update current time and offset display
  */
 function updateCurrentTime() {
@@ -641,21 +820,15 @@ function updateOffset(now) {
     const offsetEl = document.getElementById('offsetTime');
     if (!offsetEl) return;
 
-    // Find reference time (start of current item, or start of playlist)
-    let expectedTime = null;
-
-    if (currentItem && currentItem.startAt) {
-        expectedTime = new Date(currentItem.startAt);
-    } else if (playlistData && playlistData.items && playlistData.items.length > 0) {
-        // If nothing playing, compare with first item
-        expectedTime = new Date(playlistData.items[0].startAt);
-    }
-
-    if (!expectedTime) {
-        offsetEl.textContent = '--:--:--';
+    // Only calculate offset when something is actually playing
+    if (!currentItem || !currentItem.startAt) {
+        offsetEl.textContent = '±00:00:00';
         offsetEl.className = 'time-display offset-display';
         return;
     }
+
+    // Use current item's start time as reference
+    const expectedTime = new Date(currentItem.startAt);
 
     // Calculate diff in seconds
     const diffSeconds = (now - expectedTime) / 1000;
@@ -747,7 +920,12 @@ function updateNextItemInfo(item) {
     if (item) {
         nextItemName.textContent = item.name;
         if (nextItemDuration) {
-            nextItemDuration.textContent = `(${safeFormatDuration(item.durationSeconds)})`;
+            // Show hard start time if configured, otherwise show duration
+            if (item.hardStartTime) {
+                nextItemDuration.textContent = `⏰ ${item.hardStartTime}`;
+            } else {
+                nextItemDuration.textContent = `(${safeFormatDuration(item.durationSeconds)})`;
+            }
         }
 
         const thumbnailEl = document.getElementById('nextItemThumbnail');
@@ -816,6 +994,702 @@ autoModeBtn.addEventListener('click', toggleAutoplayMode);
         }
     });
 });
+
+/**
+ * ========================================
+ * GRAPHICS/TEMPLATES MANAGEMENT
+ * ========================================
+ */
+
+// Graphics panel state
+let presets = [];
+let activeTemplates = [];
+
+// Graphics DOM elements
+const templateNameEl = document.getElementById('templateName');
+const templateLayerEl = document.getElementById('templateLayer');
+const templateChannelEl = document.getElementById('templateChannel');
+const templateDataEl = document.getElementById('templateData');
+const presetListEl = document.getElementById('presetList');
+const activeTemplateListEl = document.getElementById('activeTemplateList');
+
+// Graphics buttons
+const templateLoadBtn = document.getElementById('templateLoadBtn');
+const templatePlayBtn = document.getElementById('templatePlayBtn');
+const templateStopBtn = document.getElementById('templateStopBtn');
+const templateUpdateBtn = document.getElementById('templateUpdateBtn');
+const templateRemoveBtn = document.getElementById('templateRemoveBtn');
+const templateLoadAndPlayBtn = document.getElementById('templateLoadAndPlayBtn');
+const saveAsPresetBtn = document.getElementById('saveAsPresetBtn');
+const toggleGraphicsBtn = document.getElementById('toggleGraphicsBtn');
+
+// Modal elements
+const presetModal = document.getElementById('presetModal');
+const presetNameInput = document.getElementById('presetNameInput');
+const confirmPresetBtn = document.getElementById('confirmPresetBtn');
+const cancelPresetBtn = document.getElementById('cancelPresetBtn');
+const closePresetModal = document.getElementById('closePresetModal');
+
+/**
+ * Send template command to server
+ */
+function sendTemplateCommand(type, data) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showNotification('error', 'WebSocket non connecté');
+        return;
+    }
+
+    ws.send(JSON.stringify({ type, data }));
+    console.log(`[TEMPLATE] Sent command: ${type}`, data);
+}
+
+/**
+ * Get current template form data
+ */
+function getTemplateFormData() {
+    const channel = parseInt(templateChannelEl.value);
+    const layer = parseInt(templateLayerEl.value);
+    const templateName = templateNameEl.value;
+
+    let templateData = {};
+    if (templateDataEl.value.trim()) {
+        try {
+            templateData = JSON.parse(templateDataEl.value);
+        } catch (e) {
+            showNotification('error', 'JSON invalide dans les données du template');
+            throw new Error('Invalid JSON');
+        }
+    }
+
+    return { channel, layer, templateName, templateData };
+}
+
+/**
+ * Template control button handlers
+ */
+templateLoadBtn.addEventListener('click', () => {
+    try {
+        const data = getTemplateFormData();
+        if (!data.templateName) {
+            showNotification('error', 'Veuillez sélectionner un template');
+            return;
+        }
+        sendTemplateCommand('TEMPLATE_LOAD', data);
+    } catch (e) {
+        // Error already shown
+    }
+});
+
+templatePlayBtn.addEventListener('click', () => {
+    const channel = parseInt(templateChannelEl.value);
+    const layer = parseInt(templateLayerEl.value);
+    sendTemplateCommand('TEMPLATE_PLAY', { channel, layer });
+});
+
+templateStopBtn.addEventListener('click', () => {
+    const channel = parseInt(templateChannelEl.value);
+    const layer = parseInt(templateLayerEl.value);
+    sendTemplateCommand('TEMPLATE_STOP', { channel, layer });
+});
+
+templateUpdateBtn.addEventListener('click', () => {
+    try {
+        const data = getTemplateFormData();
+        sendTemplateCommand('TEMPLATE_UPDATE', {
+            channel: data.channel,
+            layer: data.layer,
+            templateData: data.templateData
+        });
+    } catch (e) {
+        // Error already shown
+    }
+});
+
+templateRemoveBtn.addEventListener('click', () => {
+    const channel = parseInt(templateChannelEl.value);
+    const layer = parseInt(templateLayerEl.value);
+    sendTemplateCommand('TEMPLATE_REMOVE', { channel, layer });
+});
+
+templateLoadAndPlayBtn.addEventListener('click', () => {
+    try {
+        const data = getTemplateFormData();
+        if (!data.templateName) {
+            showNotification('error', 'Veuillez sélectionner un template');
+            return;
+        }
+        sendTemplateCommand('TEMPLATE_LOAD_AND_PLAY', data);
+    } catch (e) {
+        // Error already shown
+    }
+});
+
+/**
+ * Preset management
+ */
+saveAsPresetBtn.addEventListener('click', () => {
+    const templateName = templateNameEl.value;
+    if (!templateName) {
+        showNotification('error', 'Veuillez sélectionner un template');
+        return;
+    }
+
+    presetNameInput.value = '';
+    presetModal.style.display = 'flex';
+    presetNameInput.focus();
+});
+
+confirmPresetBtn.addEventListener('click', () => {
+    const name = presetNameInput.value.trim();
+    if (!name) {
+        showNotification('error', 'Veuillez entrer un nom pour le preset');
+        return;
+    }
+
+    try {
+        const data = getTemplateFormData();
+        if (!data.templateName) {
+            showNotification('error', 'Veuillez sélectionner un template');
+            return;
+        }
+
+        sendTemplateCommand('PRESET_SAVE', {
+            name,
+            channel: data.channel,
+            layer: data.layer,
+            templateName: data.templateName,
+            templateData: data.templateData
+        });
+
+        presetModal.style.display = 'none';
+        showNotification('success', `Preset "${name}" sauvegardé`);
+    } catch (e) {
+        // Error already shown
+    }
+});
+
+cancelPresetBtn.addEventListener('click', () => {
+    presetModal.style.display = 'none';
+});
+
+closePresetModal.addEventListener('click', () => {
+    presetModal.style.display = 'none';
+});
+
+/**
+ * Toggle graphics panel
+ */
+toggleGraphicsBtn.addEventListener('click', () => {
+    const panel = document.querySelector('.graphics-panel');
+    const icon = document.getElementById('graphicsToggleIcon');
+
+    panel.classList.toggle('collapsed');
+    icon.textContent = panel.classList.contains('collapsed') ? '▶' : '◀';
+});
+
+/**
+ * Render preset list
+ */
+function renderPresets() {
+    if (presets.length === 0) {
+        presetListEl.innerHTML = '<div class="empty-presets">Aucun preset sauvegardé</div>';
+        return;
+    }
+
+    presetListEl.innerHTML = presets.map(preset => `
+        <div class="preset-item" data-preset="${escapeHtml(preset.name)}">
+            <div>
+                <div class="preset-name">${escapeHtml(preset.name)}</div>
+                <div class="preset-info">${escapeHtml(preset.templateName)} @ ${preset.channel}-${preset.layer}</div>
+            </div>
+            <div class="preset-actions">
+                <button class="btn-primary btn-small preset-load">Load</button>
+                <button class="btn-danger btn-small preset-delete">×</button>
+            </div>
+        </div>
+    `).join('');
+
+    // Add event listeners
+    document.querySelectorAll('.preset-load').forEach((btn, index) => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            sendTemplateCommand('PRESET_LOAD', { name: presets[index].name, play: true });
+        });
+    });
+
+    document.querySelectorAll('.preset-delete').forEach((btn, index) => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (confirm(`Supprimer le preset "${presets[index].name}" ?`)) {
+                sendTemplateCommand('PRESET_DELETE', { name: presets[index].name });
+            }
+        });
+    });
+}
+
+/**
+ * Render active templates
+ */
+function renderActiveTemplates() {
+    if (activeTemplates.length === 0) {
+        activeTemplateListEl.innerHTML = '<div class="empty-active">Aucun template actif</div>';
+        return;
+    }
+
+    activeTemplateListEl.innerHTML = activeTemplates.map(tmpl => `
+        <div class="active-template-item ${tmpl.playing ? 'playing' : ''}">
+            <div class="active-template-header">
+                <div class="active-template-name">${escapeHtml(tmpl.templateName)}</div>
+                <div class="active-template-layer">${tmpl.channel}-${tmpl.layer}</div>
+            </div>
+            <div class="active-template-controls">
+                ${!tmpl.playing ? `<button class="btn-primary btn-small" data-channel="${tmpl.channel}" data-layer="${tmpl.layer}" data-action="play">Play</button>` : ''}
+                ${tmpl.playing ? `<button class="btn-warning btn-small" data-channel="${tmpl.channel}" data-layer="${tmpl.layer}" data-action="stop">Stop</button>` : ''}
+                <button class="btn-danger btn-small" data-channel="${tmpl.channel}" data-layer="${tmpl.layer}" data-action="remove">Remove</button>
+            </div>
+        </div>
+    `).join('');
+
+    // Add event listeners
+    document.querySelectorAll('.active-template-controls button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const channel = parseInt(btn.dataset.channel);
+            const layer = parseInt(btn.dataset.layer);
+            const action = btn.dataset.action;
+
+            if (action === 'play') {
+                sendTemplateCommand('TEMPLATE_PLAY', { channel, layer });
+            } else if (action === 'stop') {
+                sendTemplateCommand('TEMPLATE_STOP', { channel, layer });
+            } else if (action === 'remove') {
+                sendTemplateCommand('TEMPLATE_REMOVE', { channel, layer });
+            }
+        });
+    });
+}
+
+/**
+ * Request presets and active templates from server
+ */
+function requestGraphicsData() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        sendTemplateCommand('PRESET_GET_ALL', {});
+        sendTemplateCommand('TEMPLATE_GET_ACTIVE', {});
+    }
+}
+
+/**
+ * Template example data by template type
+ */
+templateNameEl.addEventListener('change', () => {
+    const templateName = templateNameEl.value;
+    const examples = {
+        'rtg-lower-third/index': '{\n  "title": "Breaking News",\n  "subtitle": "Live from Paris"\n}',
+        'rtg-clock/index': '{\n  "offset": 0\n}',
+        'rtg-countdown/index': '{\n  "target": "2025-12-31T23:59:59"\n}',
+        'rtg-full-title/index': '{\n  "title": "Programme Spécial"\n}',
+        'rtg-logo-clock/index': '{\n  "offset": 0\n}',
+        'rtg-bug/index': '{}',
+        'rtg-pip/index': '{}',
+        'rtg-roll/index': '{\n  "lines": ["Producer: John Doe", "Director: Jane Smith"]\n}',
+        'rtg-election/index': '{\n  "title": "Résultats Élections 2025",\n  "candidates": [\n    {"name": "Candidat A", "votes": 1234, "percent": 45.2},\n    {"name": "Candidat B", "votes": 987, "percent": 36.1}\n  ]\n}'
+    };
+
+    if (examples[templateName]) {
+        templateDataEl.value = examples[templateName];
+    }
+});
+
+/**
+ * ========================================
+ * MEDIA FOLDERS MANAGEMENT
+ * ========================================
+ */
+
+// Folders state
+let folders = [];
+let selectedFolderId = null; // null = show all
+
+// Folder DOM elements
+const folderListEl = document.getElementById('folderList');
+const createFolderBtn = document.getElementById('createFolderBtn');
+const selectedFolderNameEl = document.getElementById('selectedFolderName');
+
+// Folder modal elements
+const folderModal = document.getElementById('folderModal');
+const folderModalTitle = document.getElementById('folderModalTitle');
+const folderNameInput = document.getElementById('folderNameInput');
+const folderColorInput = document.getElementById('folderColorInput');
+const folderIdInput = document.getElementById('folderIdInput');
+const confirmFolderBtn = document.getElementById('confirmFolderBtn');
+const cancelFolderBtn = document.getElementById('cancelFolderBtn');
+const closeFolderModal = document.getElementById('closeFolderModal');
+
+/**
+ * Send folder command to server
+ */
+function sendFolderCommand(type, data) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        showNotification('error', 'WebSocket non connecté');
+        return;
+    }
+
+    ws.send(JSON.stringify({ type, data }));
+    console.log(`[FOLDER] Sent command: ${type}`, data);
+}
+
+/**
+ * Render folders list
+ */
+function renderFolders() {
+    console.log('[FOLDERS] Rendering', folders.length, 'folders');
+    folderListEl.innerHTML = '';
+
+    folders.forEach(folder => {
+        const item = document.createElement('div');
+        item.className = 'folder-item' + (folder.isDefault ? ' default' : '');
+        if (selectedFolderId === folder.id) {
+            item.classList.add('active');
+        }
+
+        item.innerHTML = `
+            <div class="folder-main">
+                <div class="folder-color" style="background: ${folder.color};"></div>
+                <div class="folder-name">${escapeHtml(folder.name)}</div>
+            </div>
+            <span class="folder-count">${folder.mediaCount || 0}</span>
+            ${!folder.isDefault ? `
+            <div class="folder-actions">
+                <button class="folder-action-btn edit" data-id="${folder.id}" title="Éditer">✏️</button>
+                <button class="folder-action-btn delete" data-id="${folder.id}" title="Supprimer">🗑️</button>
+            </div>
+            ` : ''}
+        `;
+
+        // Click to select folder
+        item.addEventListener('click', (e) => {
+            console.log('[FOLDERS] Clicked on folder:', folder.name, folder.id);
+            if (!e.target.classList.contains('folder-action-btn')) {
+                selectFolder(folder.id);
+            } else {
+                console.log('[FOLDERS] Clicked on action button, ignoring');
+            }
+        });
+
+        // Edit button
+        const editBtn = item.querySelector('.edit');
+        if (editBtn) {
+            editBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openFolderModal(folder);
+            });
+        }
+
+        // Delete button
+        const deleteBtn = item.querySelector('.delete');
+        if (deleteBtn) {
+            deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm(`Supprimer le dossier "${folder.name}" ?\nLes médias seront déplacés vers "Non classé".`)) {
+                    sendFolderCommand('FOLDER_DELETE', { id: folder.id });
+                }
+            });
+        }
+
+        // Drag and drop support
+        item.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            item.classList.add('drag-over');
+        });
+
+        item.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            item.classList.remove('drag-over');
+        });
+
+        item.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            item.classList.remove('drag-over');
+
+            // Get dragged media file
+            const jsonData = e.dataTransfer.getData('application/json');
+            if (jsonData) {
+                try {
+                    const data = JSON.parse(jsonData);
+                    if (data.type === 'MEDIA_ITEM' && data.file) {
+                        // Assign media to this folder
+                        sendFolderCommand('FOLDER_ASSIGN_MEDIA', {
+                            mediaFile: data.file,
+                            folderId: folder.id
+                        });
+                        showNotification('success', `"${data.name}" déplacé vers "${folder.name}"`);
+                    }
+                } catch (err) {
+                    console.error('Error parsing drag data:', err);
+                }
+            }
+        });
+
+        folderListEl.appendChild(item);
+    });
+}
+
+/**
+ * Select a folder to filter media
+ */
+function selectFolder(folderId) {
+    // Toggle selection if clicking on already selected folder
+    if (selectedFolderId === folderId) {
+        selectedFolderId = null;
+        selectedFolderNameEl.textContent = '';
+    } else {
+        selectedFolderId = folderId;
+        const folder = folders.find(f => f.id === folderId);
+        if (folder) {
+            selectedFolderNameEl.textContent = `- ${folder.name}`;
+        } else {
+            selectedFolderNameEl.textContent = '';
+        }
+    }
+
+    console.log('[FOLDERS] Selected folder ID:', selectedFolderId);
+    renderFolders();
+    renderMediaLibrary();
+}
+
+/**
+ * Open folder creation/edit modal
+ */
+function openFolderModal(folder = null) {
+    if (folder) {
+        // Edit mode
+        folderModalTitle.textContent = 'Éditer le dossier';
+        folderNameInput.value = folder.name;
+        folderColorInput.value = folder.color;
+        folderIdInput.value = folder.id;
+        confirmFolderBtn.textContent = 'Modifier';
+    } else {
+        // Create mode
+        folderModalTitle.textContent = 'Créer un dossier';
+        folderNameInput.value = '';
+        folderColorInput.value = '#118ab2';
+        folderIdInput.value = '';
+        confirmFolderBtn.textContent = 'Créer';
+    }
+
+    // Update color picker
+    document.querySelectorAll('.color-option').forEach(option => {
+        option.classList.toggle('selected', option.dataset.color === folderColorInput.value);
+    });
+
+    folderModal.style.display = 'flex';
+    folderNameInput.focus();
+}
+
+/**
+ * Close folder modal
+ */
+function closeFolderModalFunc() {
+    folderModal.style.display = 'none';
+}
+
+/**
+ * Create folder button
+ */
+createFolderBtn.addEventListener('click', () => {
+    openFolderModal();
+});
+
+/**
+ * Color picker
+ */
+document.querySelectorAll('.color-option').forEach(option => {
+    option.addEventListener('click', () => {
+        folderColorInput.value = option.dataset.color;
+
+        document.querySelectorAll('.color-option').forEach(opt => {
+            opt.classList.remove('selected');
+        });
+        option.classList.add('selected');
+    });
+});
+
+/**
+ * Confirm folder creation/edit
+ */
+confirmFolderBtn.addEventListener('click', () => {
+    const name = folderNameInput.value.trim();
+    const color = folderColorInput.value;
+    const id = folderIdInput.value;
+
+    if (!name) {
+        showNotification('error', 'Veuillez entrer un nom de dossier');
+        return;
+    }
+
+    if (id) {
+        // Edit existing folder
+        sendFolderCommand('FOLDER_UPDATE', {
+            id: parseInt(id),
+            updates: { name, color }
+        });
+    } else {
+        // Create new folder
+        sendFolderCommand('FOLDER_CREATE', {
+            name,
+            color,
+            parentId: null
+        });
+    }
+
+    closeFolderModalFunc();
+});
+
+/**
+ * Cancel folder modal
+ */
+cancelFolderBtn.addEventListener('click', closeFolderModalFunc);
+closeFolderModal.addEventListener('click', closeFolderModalFunc);
+
+/**
+ * ========================================
+ * HARD START TIME MANAGEMENT
+ * ========================================
+ */
+
+// Hard Start modal elements
+const hardStartModal = document.getElementById('hardStartModal');
+const hardStartTimeInput = document.getElementById('hardStartTimeInput');
+const hardStartEnabledInput = document.getElementById('hardStartEnabledInput');
+const hardStartItemIdInput = document.getElementById('hardStartItemId');
+const hardStartStatusDiv = document.getElementById('hardStartStatus');
+const confirmHardStartBtn = document.getElementById('confirmHardStartBtn');
+const cancelHardStartBtn = document.getElementById('cancelHardStartBtn');
+const closeHardStartModal = document.getElementById('closeHardStartModal');
+
+/**
+ * Open hard start modal
+ */
+function openHardStartModal(itemId) {
+    // Find the item in playlist
+    const item = playlistData.items.find(i => i.id === itemId);
+    if (!item) {
+        console.error('[HARD START] Item not found:', itemId);
+        return;
+    }
+
+    hardStartItemIdInput.value = itemId;
+
+    // Show scheduled start time
+    const scheduledTime = new Date(item.startAt);
+    const scheduledTimeStr = formatTimeInput(scheduledTime);
+
+    if (item.hardStartTime) {
+        hardStartTimeInput.value = item.hardStartTime;
+        hardStartEnabledInput.checked = true;
+
+        // Show status: hard start is active
+        hardStartStatusDiv.style.display = 'block';
+        hardStartStatusDiv.innerHTML = `
+            <div class="status-label">Démarrage strict actif</div>
+            <div class="status-time">⏰ ${item.hardStartTime}</div>
+            <div class="status-label" style="margin-top: 8px;">Heure planifiée: ${scheduledTimeStr}</div>
+        `;
+    } else {
+        // Default to the item's scheduled start time
+        hardStartTimeInput.value = scheduledTimeStr;
+        hardStartEnabledInput.checked = false;
+
+        // Show status: no hard start
+        hardStartStatusDiv.style.display = 'block';
+        hardStartStatusDiv.innerHTML = `
+            <div class="status-label">Heure planifiée actuelle</div>
+            <div class="status-time">${scheduledTimeStr}</div>
+            <div class="status-label" style="margin-top: 8px; color: var(--text-secondary);">Aucun démarrage strict configuré</div>
+        `;
+    }
+
+    hardStartModal.style.display = 'flex';
+    hardStartTimeInput.focus();
+}
+
+/**
+ * Close hard start modal
+ */
+function closeHardStartModalFunc() {
+    hardStartModal.style.display = 'none';
+    hardStartTimeInput.value = '';
+    hardStartEnabledInput.checked = true;
+    hardStartItemIdInput.value = '';
+}
+
+/**
+ * Format time for input (HH:MM:SS)
+ */
+function formatTimeInput(date) {
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${hours}:${minutes}:${seconds}`;
+}
+
+/**
+ * Confirm hard start time
+ */
+confirmHardStartBtn.addEventListener('click', () => {
+    const itemId = hardStartItemIdInput.value;
+    const enabled = hardStartEnabledInput.checked;
+    const time = hardStartTimeInput.value;
+
+    if (enabled && !time) {
+        showNotification('error', 'Veuillez sélectionner une heure');
+        return;
+    }
+
+    // Send to server
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'PLAYLIST_SET_HARD_START',
+            data: {
+                itemId: itemId,
+                hardStartTime: enabled ? time : null
+            }
+        }));
+    }
+
+    closeHardStartModalFunc();
+});
+
+/**
+ * Handle hard start error from server
+ */
+function handleHardStartError(data) {
+    console.error('[HARD START] Errors:', data.errors);
+
+    if (data.errors && data.errors.length > 0) {
+        const error = data.errors[0]; // Show first error
+
+        let message = `⚠️ Hard Start impossible pour "${error.itemName}":\n\n`;
+        message += error.reason;
+
+        if (error.trimNeeded && error.maxTrim) {
+            message += `\n\nRéduction nécessaire: ${error.trimNeeded}s`;
+            message += `\nRéduction maximale possible: ${error.maxTrim}s`;
+            message += `\n\nConseil: Ajoutez plus de contenu avant cet élément ou choisissez une heure de hard start plus proche.`;
+        }
+
+        showNotification('error', message, 10000); // Show for 10 seconds
+    }
+}
+
+/**
+ * Cancel hard start modal
+ */
+cancelHardStartBtn.addEventListener('click', closeHardStartModalFunc);
+closeHardStartModal.addEventListener('click', closeHardStartModalFunc);
 
 // Initialize
 console.log('[APP] RTG Playout starting...');

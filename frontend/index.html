@@ -76,8 +76,21 @@
                         <span id="scanBtnText">Scanner</span>
                     </button>
                 </div>
+
+                <!-- Folders List -->
+                <div class="folders-section">
+                    <div class="folders-header">
+                        <span>Dossiers</span>
+                        <button id="createFolderBtn" class="btn-create-folder" title="Créer un dossier">+</button>
+                    </div>
+                    <div id="folderList" class="folder-list">
+                        <!-- Folders will be inserted here -->
+                    </div>
+                </div>
+
                 <div class="media-count">
                     <span id="mediaCount">0</span> fichier(s)
+                    <span id="selectedFolderName" class="selected-folder"></span>
                 </div>
                 <div id="mediaList" class="media-list">
                     <!-- Media items will be inserted here -->
@@ -122,11 +135,169 @@
                     </div>
                 </div>
             </main>
+
+            <!-- Graphics/Templates Panel -->
+            <aside class="graphics-panel">
+                <div class="panel-header">
+                    <h3>Graphics / Templates</h3>
+                    <button id="toggleGraphicsBtn" class="btn-secondary btn-small">
+                        <span id="graphicsToggleIcon">◀</span>
+                    </button>
+                </div>
+
+                <!-- Presets -->
+                <div class="graphics-section">
+                    <h4>Presets sauvegardés</h4>
+                    <div id="presetList" class="preset-list">
+                        <!-- Presets will be inserted here -->
+                    </div>
+                    <button id="showPresetFormBtn" class="btn-primary btn-small" style="width: 100%; margin-top: 10px;">+ Nouveau preset</button>
+                </div>
+
+                <!-- Template Controls -->
+                <div class="graphics-section">
+                    <h4>Contrôle manuel</h4>
+
+                    <div class="template-form">
+                        <label>Template</label>
+                        <select id="templateName" class="form-control">
+                            <option value="">-- Sélectionner --</option>
+                            <option value="rtg-lower-third/index">Lower Third</option>
+                            <option value="rtg-clock/index">Clock</option>
+                            <option value="rtg-countdown/index">Countdown</option>
+                            <option value="rtg-full-title/index">Full Title</option>
+                            <option value="rtg-logo-clock/index">Logo + Clock</option>
+                            <option value="rtg-bug/index">Bug/Logo</option>
+                            <option value="rtg-pip/index">PIP Frame</option>
+                            <option value="rtg-roll/index">Credits Roll</option>
+                            <option value="rtg-election/index">Election Results</option>
+                        </select>
+
+                        <label>Layer</label>
+                        <select id="templateLayer" class="form-control">
+                            <option value="10">10 - Lower Third</option>
+                            <option value="20">20 - Bug</option>
+                            <option value="30">30 - Full Screen</option>
+                            <option value="40">40 - Ticker</option>
+                            <option value="50">50 - Clock</option>
+                            <option value="60">60 - Countdown</option>
+                            <option value="70">70 - Custom</option>
+                        </select>
+
+                        <label>Channel</label>
+                        <select id="templateChannel" class="form-control">
+                            <option value="1">1 - Programme Principal</option>
+                            <option value="2">2 - Preview</option>
+                        </select>
+
+                        <label>Données (JSON)</label>
+                        <textarea id="templateData" class="form-control template-data" rows="6" placeholder='{"title": "Breaking News", "subtitle": "Live from Paris"}'></textarea>
+
+                        <div class="template-actions">
+                            <button id="templateLoadBtn" class="btn-secondary btn-small">Load</button>
+                            <button id="templatePlayBtn" class="btn-primary btn-small">Play</button>
+                            <button id="templateStopBtn" class="btn-warning btn-small">Stop</button>
+                            <button id="templateUpdateBtn" class="btn-secondary btn-small">Update</button>
+                            <button id="templateRemoveBtn" class="btn-danger btn-small">Remove</button>
+                        </div>
+
+                        <button id="templateLoadAndPlayBtn" class="btn-primary" style="width: 100%; margin-top: 10px;">Load & Play</button>
+                        <button id="saveAsPresetBtn" class="btn-secondary" style="width: 100%; margin-top: 5px;">Sauvegarder comme preset</button>
+                    </div>
+                </div>
+
+                <!-- Active Templates -->
+                <div class="graphics-section">
+                    <h4>Templates actifs</h4>
+                    <div id="activeTemplateList" class="active-template-list">
+                        <!-- Active templates will be shown here -->
+                    </div>
+                </div>
+            </aside>
         </div>
     </div>
 
     <!-- Notification Container -->
     <div id="notificationContainer" class="notification-container"></div>
+
+    <!-- Save Preset Modal -->
+    <div id="presetModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Sauvegarder preset</h3>
+                <button class="modal-close" id="closePresetModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <label>Nom du preset</label>
+                <input type="text" id="presetNameInput" class="form-control" placeholder="Ex: Breaking News Red">
+            </div>
+            <div class="modal-footer">
+                <button id="cancelPresetBtn" class="btn-secondary">Annuler</button>
+                <button id="confirmPresetBtn" class="btn-primary">Sauvegarder</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hard Start Time Modal -->
+    <div id="hardStartModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Démarrage strict (Hard Start)</h3>
+                <button class="modal-close" id="closeHardStartModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="modal-info">Définir une heure de démarrage stricte pour cet élément. L'élément précédent sera automatiquement ajusté si nécessaire.</p>
+
+                <div id="hardStartStatus" class="hard-start-status" style="display: none;"></div>
+
+                <label>Heure de démarrage</label>
+                <input type="time" id="hardStartTimeInput" class="form-control" step="1">
+
+                <div class="hard-start-options">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="hardStartEnabledInput">
+                        <span>Activer le démarrage strict</span>
+                    </label>
+                </div>
+
+                <input type="hidden" id="hardStartItemId" value="">
+            </div>
+            <div class="modal-footer">
+                <button id="cancelHardStartBtn" class="btn-secondary">Annuler</button>
+                <button id="confirmHardStartBtn" class="btn-primary">Appliquer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create/Edit Folder Modal -->
+    <div id="folderModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="folderModalTitle">Créer un dossier</h3>
+                <button class="modal-close" id="closeFolderModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <label>Nom du dossier</label>
+                <input type="text" id="folderNameInput" class="form-control" placeholder="Ex: Publicités">
+
+                <label style="margin-top: 15px;">Couleur</label>
+                <div class="color-picker">
+                    <div class="color-option" data-color="#118ab2" style="background: #118ab2;"></div>
+                    <div class="color-option" data-color="#06d6a0" style="background: #06d6a0;"></div>
+                    <div class="color-option" data-color="#e63946" style="background: #e63946;"></div>
+                    <div class="color-option" data-color="#f77f00" style="background: #f77f00;"></div>
+                    <div class="color-option" data-color="#6c757d" style="background: #6c757d;"></div>
+                    <div class="color-option" data-color="#8338ec" style="background: #8338ec;"></div>
+                </div>
+                <input type="hidden" id="folderColorInput" value="#118ab2">
+                <input type="hidden" id="folderIdInput" value="">
+            </div>
+            <div class="modal-footer">
+                <button id="cancelFolderBtn" class="btn-secondary">Annuler</button>
+                <button id="confirmFolderBtn" class="btn-primary">Créer</button>
+            </div>
+        </div>
+    </div>
 
     <script src="app.js"></script>
 </body>

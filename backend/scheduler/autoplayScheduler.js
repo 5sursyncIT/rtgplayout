@@ -29,6 +29,10 @@ class AutoplayScheduler {
 
         this.lastPlayTime = 0;
         this.lastLogTime = 0;
+
+        // Playback failure detection
+        this.playbackTimeout = null;
+        this.PLAYBACK_TIMEOUT_MS = 10000; // 10 seconds
     }
 
     /**
@@ -96,6 +100,9 @@ class AutoplayScheduler {
             this.currentItemId = itemId;
             this.currentIndex = index;
 
+            // Update playlist timing to anchor this item to NOW
+            this._updatePlaylistTiming(index);
+
             // If in AUTO mode, ensure polling is active
             if (this.mode === 'AUTO') {
                 this.startStatusPolling();
@@ -104,6 +111,16 @@ class AutoplayScheduler {
             console.log(`[AUTOPLAY] Synced state to item index ${index}: ${itemId}`);
         } else {
             console.warn(`[AUTOPLAY] Could not sync state: item ${itemId} not found in playlist`);
+        }
+    }
+
+    /**
+     * Handle playlist updates (re-sync state)
+     */
+    onPlaylistUpdated() {
+        if (this.currentItemId) {
+            console.log('[AUTOPLAY] Playlist updated, re-syncing state...');
+            this.syncState(this.currentItemId);
         }
     }
 
@@ -225,6 +242,9 @@ class AutoplayScheduler {
         try {
             console.log(`[AUTOPLAY] Playing item: ${item.name} (${item.file})`);
 
+            // Clear any existing timeout
+            this.clearPlaybackTimeout();
+
             // Remove file extension for CasparCG
             const fileName = item.file.replace(/\.[^/.]+$/, '');
 
@@ -239,6 +259,9 @@ class AutoplayScheduler {
             this.currentIndex = index;
             this.lastPlayTime = Date.now();
 
+            // Update playlist timing to anchor this item to NOW
+            this._updatePlaylistTiming(index);
+
             // Broadcast status
             this.broadcast({
                 type: 'PLAYBACK_STATUS',
@@ -252,6 +275,9 @@ class AutoplayScheduler {
             // Start polling for end detection
             this.startStatusPolling();
 
+            // Set timeout to detect playback failure
+            this.startPlaybackTimeout(item);
+
             console.log(`[AUTOPLAY] Now playing: ${item.name}`);
         } catch (error) {
             console.error('[AUTOPLAY] Play failed:', error.message);
@@ -260,6 +286,14 @@ class AutoplayScheduler {
                 type: 'ERROR',
                 data: { message: `Autoplay failed: ${error.message}` }
             });
+
+            // If in AUTO mode, try playing next item after failure
+            if (this.mode === 'AUTO') {
+                console.log('[AUTOPLAY] Play command failed, attempting next item in 2 seconds...');
+                setTimeout(() => {
+                    this.playNext();
+                }, 2000);
+            }
         }
     }
 
@@ -309,6 +343,7 @@ class AutoplayScheduler {
             this.currentItemId = null;
             this.currentIndex = -1;
             this.stopStatusPolling();
+            this.clearPlaybackTimeout();
 
             console.log('[AUTOPLAY] Playback stopped');
         } catch (error) {
@@ -341,6 +376,58 @@ class AutoplayScheduler {
     }
 
     /**
+     * Start playback timeout to detect if video fails to play
+     */
+    startPlaybackTimeout(item) {
+        this.clearPlaybackTimeout();
+
+        this.playbackTimeout = setTimeout(async () => {
+            console.warn(`[AUTOPLAY] ⚠️  Playback timeout after ${this.PLAYBACK_TIMEOUT_MS / 1000}s for: ${item.name}`);
+            console.warn(`[AUTOPLAY] File may be corrupted or not playing correctly: ${item.file}`);
+
+            // Broadcast error notification
+            this.broadcast({
+                type: 'NOTIFICATION',
+                data: {
+                    level: 'error',
+                    message: `Échec de lecture: ${item.name} (timeout ${this.PLAYBACK_TIMEOUT_MS / 1000}s)`
+                }
+            });
+
+            // If in AUTO mode, try next item
+            if (this.mode === 'AUTO') {
+                console.log('[AUTOPLAY] Attempting to play next item...');
+                await this.playNext();
+            } else {
+                // In manual mode, just stop and clear
+                this.currentItemId = null;
+                this.currentIndex = -1;
+                this.stopStatusPolling();
+
+                this.broadcast({
+                    type: 'PLAYBACK_STATUS',
+                    data: {
+                        itemId: null,
+                        status: 'stopped'
+                    }
+                });
+            }
+        }, this.PLAYBACK_TIMEOUT_MS);
+
+        console.log(`[AUTOPLAY] Playback timeout set for ${this.PLAYBACK_TIMEOUT_MS / 1000}s`);
+    }
+
+    /**
+     * Clear playback timeout
+     */
+    clearPlaybackTimeout() {
+        if (this.playbackTimeout) {
+            clearTimeout(this.playbackTimeout);
+            this.playbackTimeout = null;
+        }
+    }
+
+    /**
      * Check playback status via CasparCG INFO
      */
     async checkPlaybackStatus() {
@@ -350,12 +437,54 @@ class AutoplayScheduler {
 
             const response = await this.casparClient.info(this.CASPAR_CHANNEL);
 
+            // Check if video is actually playing (has valid foreground)
+            if (this.isVideoPlaying(response)) {
+                // Video is playing successfully, clear the timeout
+                this.clearPlaybackTimeout();
+            }
+
             if (this.isFinished(response)) {
                 console.log('[AUTOPLAY] Video finished, playing next');
+                this.clearPlaybackTimeout();
                 await this.playNext();
             }
         } catch (error) {
             console.error('[AUTOPLAY] Status check failed:', error.message);
+        }
+    }
+
+    /**
+     * Check if video is actually playing (not empty/failed)
+     */
+    isVideoPlaying(data) {
+        if (!data) return false;
+
+        try {
+            const layerRegex = new RegExp(`<layer_${this.CASPAR_LAYER}\\b[^>]*>([\\s\\S]*?)<\\/layer_${this.CASPAR_LAYER}>`);
+            const layerMatch = data.match(layerRegex);
+
+            if (!layerMatch) return false;
+
+            const layerContent = layerMatch[1];
+            const foregroundMatch = layerContent.match(/<foreground>([\s\S]*?)<\/foreground>/);
+
+            if (!foregroundMatch) return false;
+
+            const foregroundContent = foregroundMatch[1];
+
+            // Check if producer is ffmpeg (not empty)
+            if (foregroundContent.includes('<producer>ffmpeg</producer>')) {
+                // Check if time is progressing (> 0)
+                const timeMatch = foregroundContent.match(/<time>([^<]+)<\/time>/);
+                if (timeMatch) {
+                    const time = parseFloat(timeMatch[1]);
+                    return !isNaN(time) && time > 0;
+                }
+            }
+
+            return false;
+        } catch (error) {
+            return false;
         }
     }
 
@@ -472,6 +601,39 @@ class AutoplayScheduler {
     }
 
     /**
+     * Update playlist base time so that item at index starts NOW
+     * @private
+     */
+    _updatePlaylistTiming(index) {
+        try {
+            const rawPlaylist = this.playlist.getRaw();
+            if (!rawPlaylist || !rawPlaylist.items) return;
+
+            let elapsedDuration = 0;
+            for (let i = 0; i < index; i++) {
+                const item = rawPlaylist.items[i];
+                if (item && typeof item.durationSeconds === 'number') {
+                    elapsedDuration += item.durationSeconds;
+                }
+            }
+
+            const newBaseStart = new Date(Date.now() - (elapsedDuration * 1000));
+            this.playlist.setBaseStartAt(newBaseStart);
+            console.log(`[AUTOPLAY] Updated playlist base time: ${newBaseStart.toISOString()} (anchored item ${index} to now)`);
+            
+            // Broadcast playlist update so clients see correct times
+            if (this.broadcast) {
+                this.broadcast({
+                    type: 'PLAYLIST_UPDATED',
+                    data: this.playlist.getScheduled()
+                });
+            }
+        } catch (error) {
+            console.error('[AUTOPLAY] Error updating playlist timing:', error);
+        }
+    }
+
+    /**
      * Get current item
      */
     getCurrentItem() {
@@ -491,9 +653,16 @@ class AutoplayScheduler {
         if (!scheduled || !scheduled.items) return null;
 
         const nextIndex = this.currentIndex + 1;
-        if (nextIndex >= scheduled.items.length) return null;
+        console.log(`[AUTOPLAY] getNextItem: currentIndex=${this.currentIndex}, nextIndex=${nextIndex}, totalItems=${scheduled.items.length}`);
+        
+        if (nextIndex >= scheduled.items.length) {
+            console.log('[AUTOPLAY] getNextItem: No next item (end of playlist)');
+            return null;
+        }
 
-        return scheduled.items[nextIndex];
+        const nextItem = scheduled.items[nextIndex];
+        console.log(`[AUTOPLAY] getNextItem: Found next item: ${nextItem.name} (${nextItem.id})`);
+        return nextItem;
     }
 
     /**

@@ -15,6 +15,9 @@ const { scanMediaDirectoryQuick, scanMediaDirectory } = require('./utils/mediaSc
 const { loadPlaylist, savePlaylist } = require('./utils/persistence');
 const { parseXMLPlaylist } = require('./utils/xmlParser');
 const CasparClient = require('./caspar/casparClient');
+const TemplateController = require('./caspar/templateController');
+const MediaFolders = require('./models/mediaFolders');
+const { saveFolders, loadFolders } = require('./utils/folderPersistence');
 
 // Force reload of AutoplayScheduler to ensure latest code is used
 // Clear all cached modules from the scheduler directory
@@ -52,8 +55,14 @@ let casparConnected = false;
 // Autoplay scheduler instance
 let autoplayScheduler = null;
 
+// Template controller instance
+let templateController = null;
+
 // Error handler instance
 let errorHandler = null;
+
+// Media folders instance
+let mediaFolders = null;
 
 // Get local IP address
 function getLocalIP() {
@@ -156,6 +165,16 @@ async function initializeMediaLibrary() {
 async function initializeCaspar() {
     casparClient = new CasparClient(CASPAR_HOST, CASPAR_PORT);
 
+    // Initialize template controller if not exists, or update client
+    if (!templateController) {
+        templateController = new TemplateController(casparClient, broadcast);
+        logger.info('[TEMPLATE] Template controller initialized');
+    } else {
+        // Update client reference in existing controller to preserve presets/state
+        templateController.casparClient = casparClient;
+        logger.info('[TEMPLATE] Template controller client updated');
+    }
+
     try {
         await casparClient.connect();
         const version = await casparClient.version();
@@ -212,10 +231,19 @@ function sendPlaylist(ws, type = 'PLAYLIST_FULL') {
  * Send media library to a specific client
  */
 function sendMediaLibrary(ws) {
+    // Enrich media files with folder information
+    const enrichedFiles = mediaLibrary.map(media => {
+        const folderId = mediaFolders ? mediaFolders.getFolderForMedia(media.file) : 1;
+        return {
+            ...media,
+            folderId
+        };
+    });
+
     const message = {
         type: 'MEDIA_LIBRARY',
         data: {
-            files: mediaLibrary,
+            files: enrichedFiles,
             isScanning: isScanning
         }
     };
@@ -289,6 +317,76 @@ function handleMessage(ws, data) {
                 handleGetAutoplayStatus(ws);
                 break;
 
+            // Template control messages
+            case 'TEMPLATE_LOAD':
+                handleTemplateLoad(message.data);
+                break;
+
+            case 'TEMPLATE_PLAY':
+                handleTemplatePlay(message.data);
+                break;
+
+            case 'TEMPLATE_STOP':
+                handleTemplateStop(message.data);
+                break;
+
+            case 'TEMPLATE_UPDATE':
+                handleTemplateUpdate(message.data);
+                break;
+
+            case 'TEMPLATE_REMOVE':
+                handleTemplateRemove(message.data);
+                break;
+
+            case 'TEMPLATE_LOAD_AND_PLAY':
+                handleTemplateLoadAndPlay(message.data);
+                break;
+
+            case 'TEMPLATE_GET_ACTIVE':
+                handleTemplateGetActive(ws);
+                break;
+
+            case 'PRESET_SAVE':
+                handlePresetSave(message.data);
+                break;
+
+            case 'PRESET_LOAD':
+                handlePresetLoad(message.data);
+                break;
+
+            case 'PRESET_GET_ALL':
+                handlePresetGetAll(ws);
+                break;
+
+            case 'PRESET_DELETE':
+                handlePresetDelete(message.data);
+                break;
+
+            // Media folder messages
+            case 'FOLDER_CREATE':
+                handleFolderCreate(message.data);
+                break;
+
+            case 'FOLDER_UPDATE':
+                handleFolderUpdate(message.data);
+                break;
+
+            case 'FOLDER_DELETE':
+                handleFolderDelete(message.data);
+                break;
+
+            case 'FOLDER_ASSIGN_MEDIA':
+                handleFolderAssignMedia(message.data);
+                break;
+
+            case 'FOLDER_GET_ALL':
+                handleFolderGetAll(ws);
+                break;
+
+            case 'PLAYLIST_SET_HARD_START':
+                handleSetHardStart(message.data);
+                break;
+
             default:
                 logger.warn(`[WS] Unknown message type: ${message.type}`);
                 ws.send(JSON.stringify({
@@ -306,6 +404,19 @@ function handleMessage(ws, data) {
 }
 
 /**
+ * Helper to notify scheduler of playlist updates
+ */
+function notifyPlaylistUpdate() {
+    if (autoplayScheduler) {
+        autoplayScheduler.onPlaylistUpdated();
+        broadcast({
+            type: 'AUTOPLAY_STATUS',
+            data: autoplayScheduler.getStatus()
+        });
+    }
+}
+
+/**
  * Handle ADD_ITEM message
  */
 async function handleAddItem(data) {
@@ -313,12 +424,17 @@ async function handleAddItem(data) {
         const item = playlist.addItem(data);
         logger.info(`[PLAYLIST] Item added: ${item.name}`);
 
+        // Recalculate hard start timings
+        playlist.recalculateWithHardStart();
+
         await autoSavePlaylist();
 
         broadcast({
             type: 'PLAYLIST_UPDATED',
             data: playlist.getScheduled()
         });
+
+        notifyPlaylistUpdate();
     } catch (error) {
         logger.error('[PLAYLIST] Error adding item:', error.message);
         throw error;
@@ -335,12 +451,17 @@ async function handleRemoveItem(data) {
         if (removed) {
             logger.info(`[PLAYLIST] Item removed: ${data.id}`);
 
+            // Recalculate hard start timings
+            playlist.recalculateWithHardStart();
+
             await autoSavePlaylist();
 
             broadcast({
                 type: 'PLAYLIST_UPDATED',
                 data: playlist.getScheduled()
             });
+
+            notifyPlaylistUpdate();
         }
     } catch (error) {
         logger.error('[PLAYLIST] Error removing item:', error.message);
@@ -359,12 +480,17 @@ async function handleReorderPlaylist(data) {
         if (success) {
             logger.info(`[PLAYLIST] Items reordered: ${fromIndex} -> ${toIndex}`);
 
+            // Recalculate hard start timings
+            playlist.recalculateWithHardStart();
+
             await autoSavePlaylist();
 
             broadcast({
                 type: 'PLAYLIST_UPDATED',
                 data: playlist.getScheduled()
             });
+
+            notifyPlaylistUpdate();
         }
     } catch (error) {
         logger.error('[PLAYLIST] Error reordering items:', error.message);
@@ -380,14 +506,71 @@ async function handleSetBaseStart(data) {
         playlist.setBaseStartAt(data.isoDate);
         logger.info(`[PLAYLIST] Base start time updated`);
 
+        // Recalculate hard start timings
+        playlist.recalculateWithHardStart();
+
         await autoSavePlaylist();
 
         broadcast({
             type: 'PLAYLIST_UPDATED',
             data: playlist.getScheduled()
         });
+
+        notifyPlaylistUpdate();
     } catch (error) {
         logger.error('[PLAYLIST] Error setting base start:', error.message);
+        throw error;
+    }
+}
+
+/**
+ * Handle PLAYLIST_SET_HARD_START message
+ */
+async function handleSetHardStart(data) {
+    try {
+        const { itemId, hardStartTime } = data;
+
+        // Find the item
+        const item = playlist.items.find(i => i.id === itemId);
+        if (!item) {
+            throw new Error(`Item ${itemId} not found`);
+        }
+
+        // Set or clear hard start time
+        if (hardStartTime) {
+            item.hardStartTime = hardStartTime;
+            logger.info(`[PLAYLIST] Hard start time set for item ${itemId}: ${hardStartTime}`);
+        } else {
+            delete item.hardStartTime;
+            logger.info(`[PLAYLIST] Hard start time removed for item ${itemId}`);
+        }
+
+        // Recalculate schedule with hard start constraints
+        const result = playlist.recalculateWithHardStart();
+
+        // If there are errors, send them to the client but still save
+        if (!result.success && result.errors.length > 0) {
+            logger.warn('[PLAYLIST] Hard start adjustment failed:', result.errors);
+
+            // Send error notification to client
+            broadcast({
+                type: 'HARD_START_ERROR',
+                data: {
+                    errors: result.errors
+                }
+            });
+        }
+
+        await autoSavePlaylist();
+
+        broadcast({
+            type: 'PLAYLIST_UPDATED',
+            data: playlist.getScheduled()
+        });
+
+        notifyPlaylistUpdate();
+    } catch (error) {
+        logger.error('[PLAYLIST] Error setting hard start:', error.message);
         throw error;
     }
 }
@@ -448,6 +631,8 @@ async function handleClearPlaylist() {
             type: 'PLAYLIST_UPDATED',
             data: playlist.getScheduled()
         });
+
+        notifyPlaylistUpdate();
     } catch (error) {
         logger.error('[PLAYLIST] Error clearing playlist:', error.message);
         throw error;
@@ -478,8 +663,9 @@ async function handleImportXML(data) {
 
         const result = await parseXMLPlaylist(data.xmlPath);
         playlist.setItems(result.items);
-
-        logger.info(`[XML] Imported ${result.items.length} items`);
+        
+        // Recalculate hard start timings
+        playlist.recalculateWithHardStart();
 
         await autoSavePlaylist();
 
@@ -488,10 +674,7 @@ async function handleImportXML(data) {
             data: playlist.getScheduled()
         });
 
-        broadcast({
-            type: 'INFO',
-            data: { message: `Imported ${result.items.length} items from ${result.source}` }
-        });
+        notifyPlaylistUpdate();
     } catch (error) {
         logger.error('[XML] Import failed:', error.message);
         broadcast({
@@ -654,6 +837,403 @@ function handleGetAutoplayStatus(ws) {
     }
 }
 
+/**
+ * Template control handlers
+ */
+async function handleTemplateLoad(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { channel, layer, templateName, templateData } = data;
+        await templateController.loadTemplate(channel, layer, templateName, templateData);
+        logger.info(`[TEMPLATE] Loaded ${templateName} on ${channel}-${layer}`);
+    } catch (error) {
+        logger.error('[TEMPLATE] Load failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Template load failed: ${error.message}` }
+        });
+    }
+}
+
+async function handleTemplatePlay(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { channel, layer } = data;
+        await templateController.playTemplate(channel, layer);
+        logger.info(`[TEMPLATE] Playing ${channel}-${layer}`);
+    } catch (error) {
+        logger.error('[TEMPLATE] Play failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Template play failed: ${error.message}` }
+        });
+    }
+}
+
+async function handleTemplateStop(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { channel, layer } = data;
+        await templateController.stopTemplate(channel, layer);
+        logger.info(`[TEMPLATE] Stopped ${channel}-${layer}`);
+    } catch (error) {
+        logger.error('[TEMPLATE] Stop failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Template stop failed: ${error.message}` }
+        });
+    }
+}
+
+async function handleTemplateUpdate(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { channel, layer, templateData } = data;
+        await templateController.updateTemplate(channel, layer, templateData);
+        logger.info(`[TEMPLATE] Updated ${channel}-${layer}`);
+    } catch (error) {
+        logger.error('[TEMPLATE] Update failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Template update failed: ${error.message}` }
+        });
+    }
+}
+
+async function handleTemplateRemove(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { channel, layer } = data;
+        await templateController.removeTemplate(channel, layer);
+        logger.info(`[TEMPLATE] Removed ${channel}-${layer}`);
+    } catch (error) {
+        logger.error('[TEMPLATE] Remove failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Template remove failed: ${error.message}` }
+        });
+    }
+}
+
+async function handleTemplateLoadAndPlay(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { channel, layer, templateName, templateData } = data;
+        await templateController.loadAndPlay(channel, layer, templateName, templateData);
+        logger.info(`[TEMPLATE] Loaded and played ${templateName} on ${channel}-${layer}`);
+    } catch (error) {
+        logger.error('[TEMPLATE] Load and play failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Template load and play failed: ${error.message}` }
+        });
+    }
+}
+
+function handleTemplateGetActive(ws) {
+    try {
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const activeTemplates = templateController.getActiveTemplates();
+        ws.send(JSON.stringify({
+            type: 'TEMPLATE_ACTIVE_LIST',
+            data: { templates: activeTemplates }
+        }));
+
+        logger.info('[TEMPLATE] Sent active templates to client');
+    } catch (error) {
+        logger.error('[TEMPLATE] Get active failed:', error.message);
+    }
+}
+
+/**
+ * Preset handlers
+ */
+function handlePresetSave(data) {
+    try {
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { name, channel, layer, templateName, templateData } = data;
+        templateController.savePreset(name, channel, layer, templateName, templateData);
+        logger.info(`[PRESET] Saved: ${name}`);
+
+        broadcast({
+            type: 'PRESET_LIST',
+            data: { presets: templateController.getPresets() }
+        });
+    } catch (error) {
+        logger.error('[PRESET] Save failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Preset save failed: ${error.message}` }
+        });
+    }
+}
+
+async function handlePresetLoad(data) {
+    try {
+        if (!casparConnected) {
+            logger.info('[CASPAR] Not connected, attempting to connect...');
+            await initializeCaspar();
+        }
+
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { name, play } = data;
+        await templateController.loadPreset(name, play !== false);
+        logger.info(`[PRESET] Loaded: ${name}`);
+    } catch (error) {
+        logger.error('[PRESET] Load failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Preset load failed: ${error.message}` }
+        });
+    }
+}
+
+function handlePresetGetAll(ws) {
+    try {
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const presets = templateController.getPresets();
+        ws.send(JSON.stringify({
+            type: 'PRESET_LIST',
+            data: { presets }
+        }));
+
+        logger.info('[PRESET] Sent presets to client');
+    } catch (error) {
+        logger.error('[PRESET] Get all failed:', error.message);
+    }
+}
+
+function handlePresetDelete(data) {
+    try {
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { name } = data;
+        templateController.deletePreset(name);
+        logger.info(`[PRESET] Deleted: ${name}`);
+
+        broadcast({
+            type: 'PRESET_LIST',
+            data: { presets: templateController.getPresets() }
+        });
+    } catch (error) {
+        logger.error('[PRESET] Delete failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Preset delete failed: ${error.message}` }
+        });
+    }
+}
+
+/**
+ * Media Folder handlers
+ */
+function handleFolderCreate(data) {
+    try {
+        if (!mediaFolders) {
+            throw new Error('Media folders not initialized');
+        }
+
+        const { name, parentId, color } = data;
+        const folder = mediaFolders.createFolder(name, parentId, color);
+        logger.info(`[FOLDER] Created: ${name}`);
+
+        // Save to disk
+        saveFolders(mediaFolders).catch(err => {
+            logger.error('[FOLDER] Failed to save after create:', err.message);
+        });
+
+        broadcast({
+            type: 'FOLDER_LIST',
+            data: { folders: mediaFolders.getAllFolders() }
+        });
+
+        broadcast({
+            type: 'NOTIFICATION',
+            data: {
+                level: 'success',
+                message: `Dossier "${name}" créé`
+            }
+        });
+    } catch (error) {
+        logger.error('[FOLDER] Create failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Folder create failed: ${error.message}` }
+        });
+    }
+}
+
+function handleFolderUpdate(data) {
+    try {
+        if (!mediaFolders) {
+            throw new Error('Media folders not initialized');
+        }
+
+        const { id, updates } = data;
+        const folder = mediaFolders.updateFolder(id, updates);
+        logger.info(`[FOLDER] Updated: ${id}`);
+
+        // Save to disk
+        saveFolders(mediaFolders).catch(err => {
+            logger.error('[FOLDER] Failed to save after update:', err.message);
+        });
+
+        broadcast({
+            type: 'FOLDER_LIST',
+            data: { folders: mediaFolders.getAllFolders() }
+        });
+    } catch (error) {
+        logger.error('[FOLDER] Update failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Folder update failed: ${error.message}` }
+        });
+    }
+}
+
+function handleFolderDelete(data) {
+    try {
+        if (!mediaFolders) {
+            throw new Error('Media folders not initialized');
+        }
+
+        const { id } = data;
+        mediaFolders.deleteFolder(id);
+        logger.info(`[FOLDER] Deleted: ${id}`);
+
+        // Save to disk
+        saveFolders(mediaFolders).catch(err => {
+            logger.error('[FOLDER] Failed to save after delete:', err.message);
+        });
+
+        broadcast({
+            type: 'FOLDER_LIST',
+            data: { folders: mediaFolders.getAllFolders() }
+        });
+
+        broadcast({
+            type: 'NOTIFICATION',
+            data: {
+                level: 'success',
+                message: 'Dossier supprimé'
+            }
+        });
+    } catch (error) {
+        logger.error('[FOLDER] Delete failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Folder delete failed: ${error.message}` }
+        });
+    }
+}
+
+function handleFolderAssignMedia(data) {
+    try {
+        if (!mediaFolders) {
+            throw new Error('Media folders not initialized');
+        }
+
+        const { mediaFile, folderId } = data;
+        mediaFolders.assignMedia(mediaFile, folderId);
+        logger.info(`[FOLDER] Assigned ${mediaFile} to folder ${folderId}`);
+
+        // Save to disk
+        saveFolders(mediaFolders).catch(err => {
+            logger.error('[FOLDER] Failed to save after assign:', err.message);
+        });
+
+        broadcast({
+            type: 'FOLDER_LIST',
+            data: { folders: mediaFolders.getAllFolders() }
+        });
+    } catch (error) {
+        logger.error('[FOLDER] Assign media failed:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Folder assign failed: ${error.message}` }
+        });
+    }
+}
+
+function handleFolderGetAll(ws) {
+    try {
+        if (!mediaFolders) {
+            throw new Error('Media folders not initialized');
+        }
+
+        ws.send(JSON.stringify({
+            type: 'FOLDER_LIST',
+            data: { folders: mediaFolders.getAllFolders() }
+        }));
+
+        logger.info('[FOLDER] Sent folder list to client');
+    } catch (error) {
+        logger.error('[FOLDER] Get all failed:', error.message);
+    }
+}
+
 // WebSocket connection handler
 wss.on('connection', (ws, req) => {
     const clientIp = req.socket.remoteAddress;
@@ -661,6 +1241,14 @@ wss.on('connection', (ws, req) => {
 
     sendPlaylist(ws, 'PLAYLIST_FULL');
     sendMediaLibrary(ws);
+
+    // Send folder list if available
+    if (mediaFolders) {
+        ws.send(JSON.stringify({
+            type: 'FOLDER_LIST',
+            data: { folders: mediaFolders.getAllFolders() }
+        }));
+    }
 
     // Send autoplay status if available
     if (autoplayScheduler) {
@@ -688,11 +1276,29 @@ wss.on('error', (error) => {
     logger.error('[WS] Server error:', error.message);
 });
 
+// Initialize media folders
+async function initializeMediaFolders() {
+    mediaFolders = new MediaFolders();
+
+    // Load saved folder structure
+    const savedData = await loadFolders();
+    if (savedData) {
+        mediaFolders.fromJSON(savedData);
+        logger.info('[FOLDERS] Loaded folder structure from disk');
+    } else {
+        logger.info('[FOLDERS] Using default folder structure');
+    }
+
+    // Auto-assign unclassified media to default folder
+    mediaFolders.recalculateCounts();
+}
+
 // Initialize server
 async function startServer() {
     await initializePlaylist();
     await initializeMediaLibrary();
     await initializeCaspar();
+    await initializeMediaFolders();
 
     // Initialize error handler
     errorHandler = new ErrorHandler(casparClient, broadcast);
