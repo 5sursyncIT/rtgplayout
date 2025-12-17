@@ -387,6 +387,14 @@ function handleMessage(ws, data) {
                 handleSetHardStart(message.data);
                 break;
 
+            case 'SECONDARY_EVENT_ADD':
+                handleSecondaryEventAdd(message.data);
+                break;
+            
+            case 'SECONDARY_EVENT_REMOVE':
+                handleSecondaryEventRemove(message.data);
+                break;
+
             default:
                 logger.warn(`[WS] Unknown message type: ${message.type}`);
                 ws.send(JSON.stringify({
@@ -572,6 +580,59 @@ async function handleSetHardStart(data) {
     } catch (error) {
         logger.error('[PLAYLIST] Error setting hard start:', error.message);
         throw error;
+    }
+}
+
+/**
+ * Handle SECONDARY_EVENT_ADD
+ */
+async function handleSecondaryEventAdd(data) {
+    try {
+        const { itemId, event } = data;
+        
+        const item = playlist.items.find(i => i.id === itemId);
+        if (!item) throw new Error(`Item ${itemId} not found`);
+
+        if (!item.secondaryEvents) item.secondaryEvents = [];
+        
+        // Add ID if missing
+        if (!event.id) event.id = `evt-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+        
+        item.secondaryEvents.push(event);
+        logger.info(`[SECONDARY] Added event to ${item.name}: ${event.type} (${event.trigger})`);
+
+        await autoSavePlaylist();
+        broadcast({ type: 'PLAYLIST_UPDATED', data: playlist.getScheduled() });
+        notifyPlaylistUpdate();
+
+    } catch (error) {
+        logger.error('[SECONDARY] Add failed:', error.message);
+        broadcast({ type: 'ERROR', data: { message: `Add event failed: ${error.message}` } });
+    }
+}
+
+/**
+ * Handle SECONDARY_EVENT_REMOVE
+ */
+async function handleSecondaryEventRemove(data) {
+    try {
+        const { itemId, eventId } = data;
+        
+        const item = playlist.items.find(i => i.id === itemId);
+        if (!item) throw new Error(`Item ${itemId} not found`);
+
+        if (item.secondaryEvents) {
+            item.secondaryEvents = item.secondaryEvents.filter(e => e.id !== eventId);
+            logger.info(`[SECONDARY] Removed event ${eventId} from ${item.name}`);
+        }
+
+        await autoSavePlaylist();
+        broadcast({ type: 'PLAYLIST_UPDATED', data: playlist.getScheduled() });
+        notifyPlaylistUpdate();
+
+    } catch (error) {
+        logger.error('[SECONDARY] Remove failed:', error.message);
+        broadcast({ type: 'ERROR', data: { message: `Remove event failed: ${error.message}` } });
     }
 }
 

@@ -282,7 +282,8 @@ class PlaylistModel {
             trimInSeconds: item.trimInSeconds || 0,
             trimOutSeconds: item.trimOutSeconds || 0,
             thumbnail: item.thumbnail || null,
-            hardStartTime: item.hardStartTime || null
+            hardStartTime: item.hardStartTime || null,
+            secondaryEvents: Array.isArray(item.secondaryEvents) ? item.secondaryEvents : []
         };
     }
 }

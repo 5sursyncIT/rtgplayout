@@ -202,11 +202,85 @@ class AutoplayScheduler {
     }
 
     /**
+     * Check and execute secondary events for the playing item
+     */
+    checkSecondaryEvents(item, now) {
+        if (!item.secondaryEvents || item.secondaryEvents.length === 0) return;
+
+        const startTime = new Date(item.startAt).getTime();
+        const nowTime = now.getTime();
+        const elapsedMs = nowTime - startTime; // Time since item started
+
+        item.secondaryEvents.forEach(event => {
+            if (event.executed) return;
+
+            let triggerTimeMs = 0;
+            if (event.trigger === 'START') {
+                triggerTimeMs = event.offsetMs || 0;
+            } else if (event.trigger === 'END') {
+                const durationMs = item.durationSeconds * 1000;
+                triggerTimeMs = durationMs - (event.offsetMs || 0);
+            }
+
+            // Execute if within 500ms window (polling interval is 1000ms, so be generous)
+            // Or if we passed it recently (missed frame catch-up)
+            if (elapsedMs >= triggerTimeMs) {
+                console.log(`[SECONDARY] Executing event: ${event.type} for ${item.name}`);
+                this.executeSecondaryEvent(event, item);
+                event.executed = true; // Mark as done (in memory only, resets on next play)
+            }
+        });
+    }
+
+    /**
+     * Execute a specific secondary event
+     */
+    async executeSecondaryEvent(event, item) {
+        try {
+            switch (event.type) {
+                case 'CG_ADD':
+                    // template: 'lower-third', data: {...}
+                    await this.casparClient.cgAdd(
+                        this.CASPAR_CHANNEL, 
+                        event.layer || 20, 
+                        0, 
+                        event.template, 
+                        true, 
+                        JSON.stringify(event.data || {})
+                    );
+                    break;
+
+                case 'CG_STOP':
+                    await this.casparClient.cgStop(
+                        this.CASPAR_CHANNEL, 
+                        event.layer || 20, 
+                        0
+                    );
+                    break;
+                
+                case 'CG_CLEAR':
+                     await this.casparClient.cgClear(
+                        this.CASPAR_CHANNEL, 
+                        event.layer || 20
+                    );
+                    break;
+
+                default:
+                    console.warn(`[SECONDARY] Unknown event type: ${event.type}`);
+            }
+        } catch (error) {
+            console.error(`[SECONDARY] Failed to execute event ${event.type}:`, error);
+        }
+    }
+
+    /**
      * Determine if item should be played now
      */
     shouldPlay(item, now, itemIndex) {
         // Already playing
         if (item.id === this.currentItemId) {
+            // Check secondary events for current item
+            this.checkSecondaryEvents(item, now);
             return false;
         }
 
