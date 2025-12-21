@@ -266,8 +266,9 @@ class PlaylistModel {
             throw new Error('[PLAYLIST] Item must have a valid name');
         }
 
+        // For 'clip' type, file is required. For 'live', file represents device number (e.g., "1")
         if (!item.file || typeof item.file !== 'string') {
-            throw new Error('[PLAYLIST] Item must have a valid file');
+            throw new Error('[PLAYLIST] Item must have a valid file/source');
         }
 
         if (typeof item.durationSeconds !== 'number' || item.durationSeconds <= 0) {
@@ -278,6 +279,7 @@ class PlaylistModel {
             id: item.id || null,
             name: item.name,
             file: item.file,
+            type: item.type || 'clip', // 'clip', 'live', 'stream'
             durationSeconds: item.durationSeconds,
             trimInSeconds: item.trimInSeconds || 0,
             trimOutSeconds: item.trimOutSeconds || 0,

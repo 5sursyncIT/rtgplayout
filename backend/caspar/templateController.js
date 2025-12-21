@@ -5,6 +5,8 @@
  * Supports multiple layers, presets, and real-time updates
  */
 
+const { savePresets, loadPresets } = require('../utils/presetPersistence');
+
 class TemplateController {
     constructor(casparClient, broadcast) {
         this.casparClient = casparClient;
@@ -12,13 +14,13 @@ class TemplateController {
 
         // Layer assignments for different template types
         this.LAYERS = {
-            LOWER_THIRD: 10,
-            BUG: 20,
-            FULL_SCREEN: 30,
-            TICKER: 40,
-            CLOCK: 50,
-            COUNTDOWN: 60,
-            CUSTOM: 70
+            LOWER_THIRD: 20,
+            BUG: 30,
+            FULL_SCREEN: 40,
+            TICKER: 50,
+            CLOCK: 60,
+            COUNTDOWN: 70,
+            CUSTOM: 80
         };
 
         // Active templates tracking
@@ -29,6 +31,36 @@ class TemplateController {
     }
 
     /**
+     * Initialize controller and load presets
+     */
+    async initialize() {
+        try {
+            const presets = await loadPresets();
+            this.presets.clear();
+            
+            for (const preset of presets) {
+                this.presets.set(preset.name, preset);
+            }
+            
+            console.log(`[TEMPLATE] Controller initialized with ${this.presets.size} presets`);
+        } catch (error) {
+            console.error('[TEMPLATE] Failed to initialize presets:', error.message);
+        }
+    }
+
+    /**
+     * Persist current presets to disk
+     */
+    async persistPresets() {
+        try {
+            const presets = this.getPresets();
+            await savePresets(presets);
+        } catch (error) {
+            console.error('[TEMPLATE] Failed to persist presets:', error.message);
+        }
+    }
+
+    /**
      * Load a template on specified layer
      */
     async loadTemplate(channel, layer, templateName, data = {}) {
@@ -36,13 +68,21 @@ class TemplateController {
             console.log(`[TEMPLATE] Loading ${templateName} on ${channel}-${layer}`);
 
             const dataJson = JSON.stringify(data);
+            
+            // Construct URL if baseUrl is set and template doesn't look like a file path
+            let templatePath = templateName;
+            if (this.baseUrl && !templateName.includes('/') && !templateName.includes('\\')) {
+                // Assuming templates are in templates/ folder relative to baseUrl
+                templatePath = `${this.baseUrl}/templates/${templateName}.html`;
+            }
 
             // CG ADD command: CG channel-layer ADD flashLayer templateName playOnLoad dataString
+            // flashLayer 1 is standard for HTML templates (0 caused issues on some servers)
             await this.casparClient.cgAdd(
                 channel,
                 layer,
-                0, // flashLayer (always 0 for HTML templates)
-                templateName,
+                1, 
+                templatePath,
                 false, // playOnLoad
                 dataJson
             );
@@ -77,7 +117,7 @@ class TemplateController {
         try {
             console.log(`[TEMPLATE] Playing ${channel}-${layer}`);
 
-            await this.casparClient.cgPlay(channel, layer, 0);
+            await this.casparClient.cgPlay(channel, layer, 1);
 
             const key = `${channel}-${layer}`;
             const template = this.activeTemplates.get(key);
@@ -106,7 +146,7 @@ class TemplateController {
         try {
             console.log(`[TEMPLATE] Stopping ${channel}-${layer}`);
 
-            await this.casparClient.cgStop(channel, layer, 0);
+            await this.casparClient.cgStop(channel, layer, 1);
 
             const key = `${channel}-${layer}`;
             const template = this.activeTemplates.get(key);
@@ -136,7 +176,7 @@ class TemplateController {
 
             const dataJson = JSON.stringify(data);
 
-            await this.casparClient.cgUpdate(channel, layer, 0, dataJson);
+            await this.casparClient.cgUpdate(channel, layer, 1, dataJson);
 
             const key = `${channel}-${layer}`;
             const template = this.activeTemplates.get(key);
@@ -218,9 +258,13 @@ class TemplateController {
             savedAt: new Date()
         });
 
+        // Persist to disk
+        this.persistPresets();
+
+        // Broadcast full list
         this.broadcast({
-            type: 'PRESET_SAVED',
-            data: { name }
+            type: 'PRESET_LIST',
+            data: { presets: this.getPresets() }
         });
 
         console.log(`[TEMPLATE] Preset saved: ${name}`);

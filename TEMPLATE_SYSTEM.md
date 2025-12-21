@@ -8,7 +8,7 @@ Le système de gestion des templates permet de contrôler les graphiques HTML de
 
 ✅ **Backend complet**
 - Contrôleur de templates avec support AMCP complet (CG ADD, PLAY, STOP, UPDATE, REMOVE)
-- Système de presets sauvegardés
+- Système de presets sauvegardés (persistance sur disque JSON)
 - Suivi des templates actifs
 - WebSocket pour communication temps réel
 
@@ -36,7 +36,7 @@ Le système de gestion des templates permet de contrôler les graphiques HTML de
 
 1. Ouvrir le panneau "Graphics / Templates" (côté droit de l'interface)
 2. Sélectionner un template dans le menu déroulant
-3. Choisir le layer (10-70 selon le type de graphic)
+3. Choisir le layer (20-80 selon le type de graphic)
 4. Choisir le channel (1 ou 2)
 5. Entrer les données JSON dans le champ "Données"
 6. Cliquer sur **"Load & Play"** pour charger et afficher directement

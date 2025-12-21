@@ -11,7 +11,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const playlist = require('./models/playlist');
-const { scanMediaDirectoryQuick, scanMediaDirectory } = require('./utils/mediaScanner');
+const { scanMediaDirectoryQuick, scanMediaDirectory, watchMediaDirectory } = require('./utils/mediaScanner');
 const { loadPlaylist, savePlaylist } = require('./utils/persistence');
 const { parseXMLPlaylist } = require('./utils/xmlParser');
 const CasparClient = require('./caspar/casparClient');
@@ -88,7 +88,12 @@ const localIP = getLocalIP();
 // Create HTTP server for frontend
 const httpServer = http.createServer((req, res) => {
     const frontendPath = path.join(__dirname, '../frontend');
-    let filePath = path.join(frontendPath, req.url === '/' ? 'index.html' : req.url);
+    
+    // Decode URL to handle spaces and special characters
+    // Also remove query string if present
+    const decodedUrl = decodeURIComponent(req.url.split('?')[0]);
+    
+    let filePath = path.join(frontendPath, decodedUrl === '/' ? 'index.html' : decodedUrl);
 
     if (!filePath.startsWith(frontendPath)) {
         res.writeHead(403);
@@ -101,7 +106,12 @@ const httpServer = http.createServer((req, res) => {
         '.html': 'text/html',
         '.js': 'text/javascript',
         '.css': 'text/css',
-        '.json': 'application/json'
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml'
     };
 
     const contentType = contentTypes[extname] || 'text/plain';
@@ -159,15 +169,60 @@ async function initializeMediaLibrary() {
     logger.info('[MEDIA] Performing quick scan of media directory...');
     mediaLibrary = await scanMediaDirectoryQuick();
     logger.info(`[MEDIA] Quick scan complete: ${mediaLibrary.length} files found`);
+
+    // Start watching for changes
+    watchMediaDirectory((newFiles) => {
+        logger.info(`[MEDIA] Detected changes, updating library (${newFiles.length} files)`);
+        mediaLibrary = newFiles;
+        
+        // Sync folders if initialized
+        if (mediaFolders) {
+             mediaFolders.syncWithPhysicalStructure(mediaLibrary);
+             mediaFolders.recalculateCounts();
+             
+             // Broadcast folder updates
+             broadcast({
+                type: 'FOLDER_LIST',
+                data: { folders: mediaFolders.getAllFolders() }
+             });
+        }
+        
+        // Broadcast media library
+        // We need to enrich files with folder IDs before sending
+        const enrichedFiles = mediaLibrary.map(media => {
+            const folderId = mediaFolders ? mediaFolders.getFolderForMedia(media.file) : 1;
+            return {
+                ...media,
+                folderId
+            };
+        });
+
+        broadcast({
+            type: 'MEDIA_LIBRARY',
+            data: {
+                files: enrichedFiles,
+                isScanning: false
+            }
+        });
+    });
 }
 
 // Initialize CasparCG connection
 async function initializeCaspar() {
     casparClient = new CasparClient(CASPAR_HOST, CASPAR_PORT);
+    
+    // Prevent crash on connection error
+    casparClient.on('error', (err) => {
+        // Only log if not already handled by connect promise catch
+        if (casparConnected) {
+             logger.error('[CASPAR] Client error:', err.message);
+        }
+    });
 
     // Initialize template controller if not exists, or update client
     if (!templateController) {
-        templateController = new TemplateController(casparClient, broadcast);
+        const baseUrl = `http://${localIP}:${HTTP_PORT}`;
+        templateController = new TemplateController(casparClient, broadcast, baseUrl);
         logger.info('[TEMPLATE] Template controller initialized');
     } else {
         // Update client reference in existing controller to preserve presets/state
@@ -660,6 +715,11 @@ async function handleScanMedia(ws) {
         mediaLibrary = await scanMediaDirectory();
         logger.info(`[MEDIA] Full scan complete: ${mediaLibrary.length} files`);
 
+        if (mediaFolders) {
+            mediaFolders.syncWithPhysicalStructure(mediaLibrary);
+            await saveFolders(mediaFolders);
+        }
+
         broadcast({
             type: 'MEDIA_LIBRARY',
             data: {
@@ -667,6 +727,13 @@ async function handleScanMedia(ws) {
                 isScanning: false
             }
         });
+        
+        if (mediaFolders) {
+            broadcast({
+                type: 'FOLDER_LIST',
+                data: { folders: mediaFolders.getAllFolders() }
+            });
+        }
     } catch (error) {
         logger.error('[MEDIA] Error during scan:', error.message);
         broadcast({
@@ -759,14 +826,19 @@ async function handlePlayItem(data) {
             throw new Error('CasparCG not connected');
         }
 
-        logger.info(`[CASPAR] Playing: ${data.file}`);
-
-        // Remove file extension for CasparCG
-        const fileName = data.file.replace(/\.[^/.]+$/, '');
-
-        await casparClient.play(CASPAR_CHANNEL, CASPAR_LAYER, fileName);
-
-        logger.info(`[CASPAR] Now playing: ${fileName}`);
+        // Find the item to check its type
+        const item = playlist.items.find(i => i.id === data.id);
+        
+        if (item && item.type === 'live') {
+            logger.info(`[CASPAR] Playing Live Input: DECKLINK ${item.file}`);
+            await casparClient.sendCommand(`PLAY ${CASPAR_CHANNEL}-${CASPAR_LAYER} DECKLINK ${item.file}`);
+        } else {
+            logger.info(`[CASPAR] Playing Clip: ${data.file}`);
+            // Remove file extension for CasparCG
+            const fileName = data.file.replace(/\.[^/.]+$/, '');
+            await casparClient.play(CASPAR_CHANNEL, CASPAR_LAYER, fileName);
+            logger.info(`[CASPAR] Now playing: ${fileName}`);
+        }
 
         // Reset retry count for this item if playback succeeds
         if (errorHandler) {
@@ -1313,10 +1385,41 @@ wss.on('connection', (ws, req) => {
 
     // Send autoplay status if available
     if (autoplayScheduler) {
+        const status = autoplayScheduler.getStatus();
+        
+        // Send current status immediately
         ws.send(JSON.stringify({
             type: 'AUTOPLAY_STATUS',
-            data: autoplayScheduler.getStatus()
+            data: status
         }));
+
+        // If no item is currently tracked as playing, try to recover from CasparCG
+        // This handles cases where server restarted or state was lost but Caspar is playing
+        if (!status.currentItem) {
+             logger.info('[WS] No active item detected, attempting to recover state from CasparCG...');
+             autoplayScheduler.recoverState().then(() => {
+                 // Send updated status after recovery attempt
+                 const newStatus = autoplayScheduler.getStatus();
+                 if (newStatus.currentItem) {
+                     ws.send(JSON.stringify({
+                        type: 'AUTOPLAY_STATUS',
+                        data: newStatus
+                     }));
+                 }
+             });
+        }
+    }
+
+    // Send presets to client
+    if (templateController) {
+        const presets = templateController.getPresets();
+        if (presets.length > 0) {
+            ws.send(JSON.stringify({
+                type: 'PRESET_LIST',
+                data: { presets }
+            }));
+            logger.info(`[WS] Sent ${presets.length} presets to client`);
+        }
     }
 
     ws.on('message', (data) => {
@@ -1348,6 +1451,11 @@ async function initializeMediaFolders() {
         logger.info('[FOLDERS] Loaded folder structure from disk');
     } else {
         logger.info('[FOLDERS] Using default folder structure');
+    }
+
+    // Sync with physical structure if library is loaded
+    if (mediaLibrary && mediaLibrary.length > 0) {
+        mediaFolders.syncWithPhysicalStructure(mediaLibrary);
     }
 
     // Auto-assign unclassified media to default folder

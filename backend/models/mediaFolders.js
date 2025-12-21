@@ -136,6 +136,47 @@ class MediaFolders {
     }
 
     /**
+     * Sync assignments with physical directory structure
+     * @param {Array} mediaFiles - List of media files from scanner
+     */
+    syncWithPhysicalStructure(mediaFiles) {
+        let changed = false;
+
+        for (const media of mediaFiles) {
+            // Check if file is in a subdirectory (contains forward slash)
+            // media.file uses forward slashes as normalized by scanner
+            const parts = media.file.split('/');
+            
+            if (parts.length > 1) {
+                // It's in a subdirectory
+                const folderName = parts[0];
+                
+                // Find folder by name (case insensitive)
+                let targetFolderId = null;
+                for (const folder of this.folders.values()) {
+                    if (folder.name.toLowerCase() === folderName.toLowerCase()) {
+                        targetFolderId = folder.id;
+                        break;
+                    }
+                }
+                
+                if (targetFolderId) {
+                    // Only assign if not already assigned explicitly
+                    if (!this.mediaAssignments.has(media.file)) {
+                        this.mediaAssignments.set(media.file, targetFolderId);
+                        changed = true;
+                        console.log(`[FOLDERS] Auto-assigned ${media.file} to folder "${folderName}"`);
+                    }
+                }
+            }
+        }
+        
+        if (changed) {
+            this.recalculateCounts();
+        }
+    }
+
+    /**
      * Get folder for a media file
      */
     getFolderForMedia(mediaFile) {

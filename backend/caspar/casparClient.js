@@ -177,9 +177,24 @@ class CasparClient extends EventEmitter {
 
     /**
      * Play a file on specified channel-layer
+     * @param {number} channel - Channel number
+     * @param {number} layer - Layer number
+     * @param {string} file - File name
+     * @param {number} [seek] - Start frame (optional)
+     * @param {number} [length] - Duration in frames (optional)
      */
-    async play(channel, layer, file) {
-        const response = await this.sendCommand(`PLAY ${channel}-${layer} "${file}"`);
+    async play(channel, layer, file, seek, length) {
+        let command = `PLAY ${channel}-${layer} "${file}"`;
+        
+        if (seek !== undefined && seek !== null) {
+            command += ` SEEK ${Math.floor(seek)}`;
+        }
+        
+        if (length !== undefined && length !== null) {
+            command += ` LENGTH ${Math.floor(length)}`;
+        }
+
+        const response = await this.sendCommand(command);
         return response;
     }
 

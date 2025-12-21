@@ -13,7 +13,12 @@
         <!-- Header -->
         <header class="header">
             <div class="header-left">
-                <h1>RTG PLAYOUT</h1>
+                <div class="header-title-row">
+                    <h1>RTG PLAYOUT</h1>
+                    <button id="addLiveBtn" class="btn-primary btn-small" title="Ajouter une entrée Direct">
+                        <span>+ Direct</span>
+                    </button>
+                </div>
                 <div class="channel-info">Canal 1 - Programme Principal</div>
             </div>
             <div class="header-right">
@@ -72,9 +77,11 @@
             <aside class="media-library">
                 <div class="panel-header">
                     <h3>Médiathèque</h3>
-                    <button id="scanBtn" class="btn-secondary btn-small">
-                        <span id="scanBtnText">Scanner</span>
-                    </button>
+                    <div class="header-actions">
+                        <button id="scanBtn" class="btn-secondary btn-small">
+                            <span id="scanBtnText">Scanner</span>
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Folders List -->
@@ -175,13 +182,13 @@
 
                         <label>Layer</label>
                         <select id="templateLayer" class="form-control">
-                            <option value="10">10 - Lower Third</option>
-                            <option value="20">20 - Bug</option>
-                            <option value="30">30 - Full Screen</option>
-                            <option value="40">40 - Ticker</option>
-                            <option value="50">50 - Clock</option>
-                            <option value="60">60 - Countdown</option>
-                            <option value="70">70 - Custom</option>
+                            <option value="20">20 - Lower Third</option>
+                            <option value="30">30 - Bug</option>
+                            <option value="40">40 - Full Screen</option>
+                            <option value="50">50 - Ticker</option>
+                            <option value="60">60 - Clock</option>
+                            <option value="70">70 - Countdown</option>
+                            <option value="80">80 - Custom</option>
                         </select>
 
                         <label>Channel</label>
@@ -374,6 +381,40 @@
             <div class="modal-footer">
                 <button id="cancelFolderBtn" class="btn-secondary">Annuler</button>
                 <button id="confirmFolderBtn" class="btn-primary">Créer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Live Input Modal -->
+    <div id="liveInputModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Ajouter une entrée Direct (Live)</h3>
+                <button class="modal-close" id="closeLiveInputModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <label>Nom de l'événement</label>
+                <input type="text" id="liveNameInput" class="form-control" placeholder="Ex: DIRECT PLATEAU">
+
+                <label>Source DeckLink</label>
+                <select id="liveSourceInput" class="form-control">
+                    <option value="1">DeckLink 1</option>
+                    <option value="2">DeckLink 2</option>
+                    <option value="3">DeckLink 3</option>
+                    <option value="4">DeckLink 4</option>
+                    <option value="5">DeckLink 5</option>
+                    <option value="6">DeckLink 6</option>
+                    <option value="7">DeckLink 7</option>
+                    <option value="8">DeckLink 8</option>
+                </select>
+
+                <label>Durée prévue (HH:MM:SS)</label>
+                <input type="text" id="liveDurationInput" class="form-control" value="00:10:00" placeholder="00:10:00">
+                <small class="form-help">La durée est utilisée pour le calcul du timing. En mode AUTO, la lecture passera à l'élément suivant après ce délai.</small>
+            </div>
+            <div class="modal-footer">
+                <button id="cancelLiveBtn" class="btn-secondary">Annuler</button>
+                <button id="confirmLiveBtn" class="btn-primary">Ajouter à la playlist</button>
             </div>
         </div>
     </div>

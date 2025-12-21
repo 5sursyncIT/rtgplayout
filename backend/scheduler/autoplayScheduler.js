@@ -135,27 +135,86 @@ class AutoplayScheduler {
 
             // Extract file name from response
             // <file>name_of_file</file>
-            const fileMatch = response.match(/<file>([^<]+)<\/file>/);
+            let playingFile = null;
+            let currentPosition = 0;
 
-            if (fileMatch && fileMatch[1]) {
-                const playingFile = fileMatch[1];
-                console.log(`[AUTOPLAY] CasparCG is playing: ${playingFile}`);
+            // Pattern 1: Simple <file>name</file>
+            const simpleMatch = response.match(/<file>([^<]+)<\/file>/);
+            if (simpleMatch && !simpleMatch[1].trim().startsWith('<')) {
+                playingFile = simpleMatch[1];
+            }
+
+            // Pattern 2: Nested <file><name>name</name></file> inside layer 10 (CasparCG 2.2+)
+            if (!playingFile) {
+                // Find layer 10 block
+                const layerMatch = response.match(/<layer_10>[\s\S]*?<\/layer_10>/);
+                if (layerMatch) {
+                    // Look for foreground file name
+                    const foregroundMatch = layerMatch[0].match(/<foreground>[\s\S]*?<\/foreground>/);
+                    if (foregroundMatch) {
+                        const nameMatch = foregroundMatch[0].match(/<name>([^<]+)<\/name>/);
+                        if (nameMatch) {
+                            playingFile = nameMatch[1];
+                        }
+
+                        // Try to parse current time (position)
+                        const timeMatch = foregroundMatch[0].match(/<time>([\d.]+)<\/time>/);
+                        if (timeMatch) {
+                            currentPosition = parseFloat(timeMatch[1]);
+                        }
+                    }
+                }
+            }
+
+            if (playingFile) {
+                console.log(`[AUTOPLAY] CasparCG is playing: ${playingFile} (Position: ${currentPosition}s)`);
 
                 // Find in playlist (ignoring extension differences if needed)
                 const scheduled = this.playlist.getScheduled();
                 if (!scheduled || !scheduled.items) return;
 
                 // Normalize for comparison (remove extension, lowercase)
-                const normalize = (str) => str.replace(/\.[^/.]+$/, '').toLowerCase();
+                const normalize = (str) => str.replace(/^.*[\\/]/, '').replace(/\.[^/.]+$/, '').toLowerCase();
                 const normalizedPlaying = normalize(playingFile);
 
-                const foundItem = scheduled.items.find(item =>
-                    normalize(item.file) === normalizedPlaying
-                );
+                const itemIndex = scheduled.items.findIndex(item => {
+                    // Check for standard file match
+                    if (normalize(item.file) === normalizedPlaying) return true;
+                    
+                    // Check for Live Input match (e.g. "DECKLINK 1" vs file "1")
+                    if (item.type === 'live' && normalizedPlaying.includes('decklink') && normalizedPlaying.includes(item.file)) {
+                        return true;
+                    }
+                    
+                    return false;
+                });
 
-                if (foundItem) {
+                if (itemIndex !== -1) {
+                    const foundItem = scheduled.items[itemIndex];
                     console.log(`[AUTOPLAY] Found matching item in playlist: ${foundItem.name}`);
-                    this.syncState(foundItem.id);
+
+                    this.currentItemId = foundItem.id;
+                    this.currentIndex = itemIndex;
+
+                    if (currentPosition > 0) {
+                        // Calculate duration of all items BEFORE this one
+                        let previousDuration = 0;
+                        for (let i = 0; i < itemIndex; i++) {
+                            previousDuration += scheduled.items[i].durationSeconds;
+                        }
+
+                        // New Base Start = Now - (Position + PreviousItemsDuration)
+                        const newBaseStart = new Date(Date.now() - ((currentPosition + previousDuration) * 1000));
+                        this.playlist.setBaseStartAt(newBaseStart);
+                        console.log(`[AUTOPLAY] Synced playlist timing. Base Start: ${newBaseStart.toISOString()}`);
+
+                        // If in AUTO mode, ensure polling is active
+                        if (this.mode === 'AUTO') {
+                            this.startStatusPolling();
+                        }
+                    } else {
+                        this.syncState(foundItem.id);
+                    }
 
                     // Also start polling to detect when it finishes
                     this.startStatusPolling();
@@ -237,13 +296,19 @@ class AutoplayScheduler {
      */
     async executeSecondaryEvent(event, item) {
         try {
+            console.log(`[SECONDARY] Executing event: ${event.type} (Trigger: ${event.trigger}, Offset: ${event.offsetMs}ms)`);
             switch (event.type) {
                 case 'CG_ADD':
                     // template: 'lower-third', data: {...}
+                    if (!event.template) {
+                         console.warn('[SECONDARY] CG_ADD failed: No template specified');
+                         return;
+                    }
+                    console.log(`[SECONDARY] CG_ADD Layer ${event.layer || 20}: ${event.template}`);
                     await this.casparClient.cgAdd(
                         this.CASPAR_CHANNEL, 
                         event.layer || 20, 
-                        0, 
+                        1, 
                         event.template, 
                         true, 
                         JSON.stringify(event.data || {})
@@ -251,14 +316,16 @@ class AutoplayScheduler {
                     break;
 
                 case 'CG_STOP':
+                    console.log(`[SECONDARY] CG_STOP Layer ${event.layer || 20}`);
                     await this.casparClient.cgStop(
                         this.CASPAR_CHANNEL, 
                         event.layer || 20, 
-                        0
+                        1
                     );
                     break;
                 
                 case 'CG_CLEAR':
+                     console.log(`[SECONDARY] CG_CLEAR Layer ${event.layer || 20}`);
                      await this.casparClient.cgClear(
                         this.CASPAR_CHANNEL, 
                         event.layer || 20
@@ -316,18 +383,36 @@ class AutoplayScheduler {
         try {
             console.log(`[AUTOPLAY] Playing item: ${item.name} (${item.file})`);
 
+            // Reset secondary events flags
+            if (item.secondaryEvents) {
+                item.secondaryEvents.forEach(e => e.executed = false);
+            }
+
             // Clear any existing timeout
             this.clearPlaybackTimeout();
 
-            // Remove file extension for CasparCG
-            const fileName = item.file.replace(/\.[^/.]+$/, '');
+            if (item.type === 'live') {
+                // Handle Live Input (DeckLink)
+                console.log(`[AUTOPLAY] Starting Live Input: DECKLINK ${item.file}`);
+                await this.casparClient.sendCommand(`PLAY ${this.CASPAR_CHANNEL}-${this.CASPAR_LAYER} DECKLINK ${item.file}`);
+            } else {
+                // Handle Video Clip
+                // Remove file extension for CasparCG
+                const fileName = item.file.replace(/\.[^/.]+$/, '');
 
-            // Send PLAY command
-            await this.casparClient.play(
-                this.CASPAR_CHANNEL,
-                this.CASPAR_LAYER,
-                fileName
-            );
+                // Calculate Seek and Length in frames
+                const seekFrames = (item.trimInSeconds || 0) * this.FRAME_RATE;
+                const lengthFrames = item.durationSeconds * this.FRAME_RATE;
+
+                // Send PLAY command with Seek and Length
+                await this.casparClient.play(
+                    this.CASPAR_CHANNEL,
+                    this.CASPAR_LAYER,
+                    fileName,
+                    seekFrames > 0 ? seekFrames : null,
+                    lengthFrames > 0 ? lengthFrames : null
+                );
+            }
 
             this.currentItemId = item.id;
             this.currentIndex = index;
@@ -433,6 +518,12 @@ class AutoplayScheduler {
 
         this.statusPoller = setInterval(async () => {
             await this.checkPlaybackStatus();
+
+            // Check secondary events for current item (even in MANUAL mode)
+            const currentItem = this.getCurrentItem();
+            if (currentItem && currentItem.id === this.currentItemId) {
+                this.checkSecondaryEvents(currentItem, new Date());
+            }
         }, this.STATUS_POLL_INTERVAL);
 
         console.log('[AUTOPLAY] Status polling started');
@@ -510,11 +601,26 @@ class AutoplayScheduler {
             if (Date.now() - this.lastPlayTime < 2000) return;
 
             const response = await this.casparClient.info(this.CASPAR_CHANNEL);
+            const currentItem = this.getCurrentItem();
 
             // Check if video is actually playing (has valid foreground)
             if (this.isVideoPlaying(response)) {
                 // Video is playing successfully, clear the timeout
                 this.clearPlaybackTimeout();
+            }
+
+            // Special handling for Live items: check duration expiration
+            if (currentItem && currentItem.type === 'live') {
+                const now = Date.now();
+                const endTime = new Date(currentItem.endAt).getTime();
+                
+                // Check if duration expired
+                if (now >= endTime) {
+                    console.log('[AUTOPLAY] Live item finished (duration expired), playing next');
+                    this.clearPlaybackTimeout();
+                    await this.playNext();
+                    return;
+                }
             }
 
             if (this.isFinished(response)) {
@@ -547,7 +653,12 @@ class AutoplayScheduler {
             const foregroundContent = foregroundMatch[1];
 
             // Check if producer is ffmpeg (not empty)
-            if (foregroundContent.includes('<producer>ffmpeg</producer>')) {
+            if (foregroundContent.includes('<producer>ffmpeg</producer>') || 
+                foregroundContent.includes('<producer>decklink</producer>')) {
+                
+                // For decklink, we assume it's always playing if present
+                if (foregroundContent.includes('<producer>decklink</producer>')) return true;
+
                 // Check if time is progressing (> 0)
                 const timeMatch = foregroundContent.match(/<time>([^<]+)<\/time>/);
                 if (timeMatch) {
@@ -756,6 +867,8 @@ class AutoplayScheduler {
                 id: currentItem.id,
                 name: currentItem.name,
                 file: currentItem.file,
+                startAt: currentItem.startAt,
+                durationSeconds: currentItem.durationSeconds,
                 status: 'PLAYING'
             } : null,
             nextItem: nextItem ? {

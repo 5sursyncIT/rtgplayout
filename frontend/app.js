@@ -229,19 +229,16 @@ function handleScanStarted() {
 }
 
 /**
- * Handle playback status update
+ * Update playlist rows visual state
  */
-function handlePlaybackStatus(data) {
-    currentlyPlaying = data.itemId;
-
-    // Update UI to show which item is playing
+function updatePlaylistRows(playingItemId) {
     const rows = playlistBodyEl.querySelectorAll('tr');
     rows.forEach(row => {
         const itemId = row.dataset.itemId;
         const playBtn = row.querySelector('.btn-play');
         const onAirIndicator = row.querySelector('.on-air-indicator');
 
-        if (itemId === currentlyPlaying && data.status === 'playing') {
+        if (itemId === playingItemId) {
             row.classList.add('playing');
             if (playBtn) playBtn.textContent = '⏸';
             if (onAirIndicator) onAirIndicator.style.display = 'inline-block';
@@ -251,6 +248,20 @@ function handlePlaybackStatus(data) {
             if (onAirIndicator) onAirIndicator.style.display = 'none';
         }
     });
+}
+
+/**
+ * Handle playback status update
+ */
+function handlePlaybackStatus(data) {
+    currentlyPlaying = data.itemId;
+
+    // Update UI to show which item is playing
+    if (data.status === 'playing') {
+        updatePlaylistRows(currentlyPlaying);
+    } else {
+        updatePlaylistRows(null);
+    }
 
     console.log('[PLAYBACK]', data.status, data.file || '');
 }
@@ -447,9 +458,10 @@ function renderPlaylist(data) {
       <td class="col-index">${index + 1}</td>
       <td class="col-name">
         ${escapeHtml(item.name)}
+        ${item.type === 'live' ? '<span class="live-badge">DIRECT</span>' : ''}
         ${hardStartIndicator}
       </td>
-      <td class="col-file">${escapeHtml(item.file)}</td>
+      <td class="col-file">${item.type === 'live' ? `DeckLink ${escapeHtml(item.file)}` : escapeHtml(item.file)}</td>
       <td class="col-duration">
         ${safeFormatDuration(item.durationSeconds)}
         ${item.trimOutSeconds > 0 ? `<span class="trim-info" title="Raccourci de ${item.trimOutSeconds}s">✂️ -${safeFormatDuration(item.trimOutSeconds)}</span>` : ''}
@@ -891,6 +903,15 @@ function handleAutoplayStatus(data) {
 
     console.log('[DEBUG] handleAutoplayStatus data:', JSON.stringify(data, null, 2));
     console.log('[AUTOPLAY] Status update:', data);
+
+    // Sync currentlyPlaying ID and visual state
+    if (currentItem && currentItem.status === 'PLAYING') {
+        currentlyPlaying = currentItem.id;
+        updatePlaylistRows(currentlyPlaying);
+    } else {
+        currentlyPlaying = null;
+        updatePlaylistRows(null);
+    }
 
     // Update UI
     updateModeButton(data.mode);
@@ -1855,6 +1876,85 @@ function handleHardStartError(data) {
  */
 cancelHardStartBtn.addEventListener('click', closeHardStartModalFunc);
 closeHardStartModal.addEventListener('click', closeHardStartModalFunc);
+
+// ==========================================
+// LIVE INPUT MANAGEMENT
+// ==========================================
+
+const liveInputModal = document.getElementById('liveInputModal');
+const addLiveBtn = document.getElementById('addLiveBtn');
+const closeLiveInputModal = document.getElementById('closeLiveInputModal');
+const cancelLiveBtn = document.getElementById('cancelLiveBtn');
+const confirmLiveBtn = document.getElementById('confirmLiveBtn');
+const liveNameInput = document.getElementById('liveNameInput');
+const liveSourceInput = document.getElementById('liveSourceInput');
+const liveDurationInput = document.getElementById('liveDurationInput');
+
+if (addLiveBtn) {
+    addLiveBtn.addEventListener('click', () => {
+        if (liveInputModal) liveInputModal.style.display = 'flex';
+    });
+}
+
+if (closeLiveInputModal) {
+    closeLiveInputModal.addEventListener('click', () => {
+        if (liveInputModal) liveInputModal.style.display = 'none';
+    });
+}
+
+if (cancelLiveBtn) {
+    cancelLiveBtn.addEventListener('click', () => {
+        if (liveInputModal) liveInputModal.style.display = 'none';
+    });
+}
+
+if (confirmLiveBtn) {
+    confirmLiveBtn.addEventListener('click', () => {
+        const name = liveNameInput.value.trim();
+        const source = liveSourceInput.value;
+        const durationStr = liveDurationInput.value.trim();
+
+        if (!name) {
+            showNotification('error', 'Le nom est requis');
+            return;
+        }
+
+        // Parse duration HH:MM:SS
+        const parts = durationStr.split(':').map(Number);
+        if (parts.length !== 3 || parts.some(isNaN)) {
+             showNotification('error', 'Format de durée invalide (HH:MM:SS)');
+             return;
+        }
+
+        const durationSeconds = (parts[0] * 3600) + (parts[1] * 60) + parts[2];
+        if (durationSeconds <= 0) {
+            showNotification('error', 'La durée doit être supérieure à 0');
+            return;
+        }
+
+        const newItem = {
+            name: name,
+            file: source,
+            type: 'live',
+            durationSeconds: durationSeconds
+        };
+
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'ADD_ITEM',
+                data: newItem
+            }));
+            showNotification('success', 'Entrée Direct ajoutée');
+            if (liveInputModal) liveInputModal.style.display = 'none';
+            
+            // Reset form
+            liveNameInput.value = '';
+            liveDurationInput.value = '00:10:00';
+        } else {
+            showNotification('error', 'Non connecté au serveur');
+        }
+    });
+}
 
 // Initialize
 console.log('[APP] RTG Playout starting...');
