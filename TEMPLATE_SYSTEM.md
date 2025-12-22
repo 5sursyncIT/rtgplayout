@@ -62,6 +62,10 @@ Le système de gestion des templates permet de contrôler les graphiques HTML de
 - Cliquer sur **"Load"** à côté du preset
 - Le template sera chargé et affiché automatiquement
 
+#### Import / Export de presets
+- **Exporter**: Sauvegarde tous les presets dans un fichier `.json`.
+- **Importer**: Charge des presets depuis un fichier `.json` (les noms identiques seront écrasés).
+
 #### Supprimer un preset
 - Cliquer sur **"×"** à côté du preset
 - Confirmer la suppression
@@ -239,8 +243,8 @@ Les layers sont organisés par type de graphic:
 
 ## Prochaines améliorations possibles
 
-- [ ] Persistance des presets sur disque (actuellement en mémoire)
-- [ ] Import/export de presets
+- [x] Persistance des presets sur disque (JSON)
+- [x] Import/export de presets
 - [ ] Raccourcis clavier pour presets fréquents
 - [ ] Prévisualisation des templates
 - [ ] Groupes de templates (ex: "Package élections complet")
@@ -248,8 +252,6 @@ Les layers sont organisés par type de graphic:
 - [ ] Intégration avec le système d'autoplay
 
 ## Notes importantes
-
-⚠️ **Les presets sont actuellement stockés en mémoire** - Ils seront perdus au redémarrage du serveur. Pour une utilisation en production, implémenter la persistance sur disque.
 
 ✅ **Le système est complètement fonctionnel** pour contrôler tous les templates CasparCG HTML en temps réel.
 

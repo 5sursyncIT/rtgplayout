@@ -494,9 +494,16 @@ class AutoplayScheduler {
 
     /**
      * Stop current playback
+     * IMPORTANT: This also switches to MANUAL mode to prevent auto-restart
      */
     async stopPlayback() {
         try {
+            console.log('[AUTOPLAY] stopPlayback() called - switching to MANUAL mode');
+
+            // CRITICAL: Switch to MANUAL mode to prevent scheduler from restarting
+            const previousMode = this.mode;
+            this.mode = 'MANUAL';
+
             await this.casparClient.stop(this.CASPAR_CHANNEL, this.CASPAR_LAYER);
 
             this.currentItemId = null;
@@ -504,7 +511,15 @@ class AutoplayScheduler {
             this.stopStatusPolling();
             this.clearPlaybackTimeout();
 
-            console.log('[AUTOPLAY] Playback stopped');
+            console.log(`[AUTOPLAY] Playback stopped and mode changed: ${previousMode} → MANUAL`);
+
+            // Broadcast mode change to all clients
+            if (this.broadcast) {
+                this.broadcast({
+                    type: 'AUTOPLAY_STATUS',
+                    data: this.getStatus()
+                });
+            }
         } catch (error) {
             console.error('[AUTOPLAY] Stop failed:', error.message);
         }

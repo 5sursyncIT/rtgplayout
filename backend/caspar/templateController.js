@@ -32,19 +32,87 @@ class TemplateController {
 
     /**
      * Initialize controller and load presets
+     * Note: Call syncWithCaspar() separately after CasparCG is connected
      */
     async initialize() {
         try {
             const presets = await loadPresets();
             this.presets.clear();
-            
+
             for (const preset of presets) {
                 this.presets.set(preset.name, preset);
             }
-            
+
             console.log(`[TEMPLATE] Controller initialized with ${this.presets.size} presets`);
+
+            // Note: syncWithCaspar() should be called after CasparCG connection
+            // is established, not here during initialization
         } catch (error) {
             console.error('[TEMPLATE] Failed to initialize presets:', error.message);
+        }
+    }
+
+    /**
+     * Sync with CasparCG to detect already-loaded templates
+     */
+    async syncWithCaspar() {
+        try {
+            console.log('[TEMPLATE] Syncing with CasparCG to detect active templates...');
+
+            const response = await this.casparClient.info(1); // Channel 1
+
+            // Parse XML to find active HTML templates
+            const layerRegex = /<layer_(\d+)>([\s\S]*?)<\/layer_\d+>/g;
+            let match;
+            let foundCount = 0;
+
+            while ((match = layerRegex.exec(response)) !== null) {
+                const layerNum = parseInt(match[1]);
+                const layerContent = match[2];
+
+                // Check if foreground has HTML producer
+                const foregroundMatch = layerContent.match(/<foreground>([\s\S]*?)<\/foreground>/);
+                if (!foregroundMatch) continue;
+
+                const foreground = foregroundMatch[1];
+
+                // Check if it's an HTML template
+                if (foreground.includes('<producer>html</producer>')) {
+                    // Extract template path
+                    const pathMatch = foreground.match(/<path>file:\/\/(.+?)<\/path>/);
+                    if (pathMatch) {
+                        const fullPath = pathMatch[1];
+                        // Extract template name from path (e.g., "Z:\nodal\templates/rtg-logo-clock/index.html" → "rtg-logo-clock")
+                        const templateMatch = fullPath.match(/templates[\/\\]([^\/\\]+)[\/\\]/);
+                        const templateName = templateMatch ? templateMatch[1] : 'unknown';
+
+                        const key = `1-${layerNum}`;
+
+                        // Only add if not already tracked
+                        if (!this.activeTemplates.has(key)) {
+                            this.activeTemplates.set(key, {
+                                channel: 1,
+                                layer: layerNum,
+                                templateName,
+                                data: {},
+                                playing: true,
+                                loadedAt: new Date(),
+                                syncedFromCaspar: true
+                            });
+                            foundCount++;
+                            console.log(`[TEMPLATE] Detected active template on layer ${layerNum}: ${templateName}`);
+                        }
+                    }
+                }
+            }
+
+            if (foundCount > 0) {
+                console.log(`[TEMPLATE] Synced ${foundCount} active template(s) from CasparCG`);
+            } else {
+                console.log('[TEMPLATE] No active templates found in CasparCG');
+            }
+        } catch (error) {
+            console.error('[TEMPLATE] Sync with CasparCG failed:', error.message);
         }
     }
 
@@ -307,8 +375,11 @@ class TemplateController {
     /**
      * Delete a preset
      */
-    deletePreset(name) {
+    async deletePreset(name) {
         if (this.presets.delete(name)) {
+            // Persist changes to disk
+            await this.persistPresets();
+
             this.broadcast({
                 type: 'PRESET_DELETED',
                 data: { name }
@@ -316,6 +387,35 @@ class TemplateController {
             return { success: true };
         }
         throw new Error(`Preset "${name}" not found`);
+    }
+
+    /**
+     * Import presets from JSON
+     */
+    async importPresets(newPresets, overwrite = false) {
+        let importedCount = 0;
+        
+        for (const preset of newPresets) {
+            if (!preset.name || !preset.templateName) continue;
+            
+            if (overwrite || !this.presets.has(preset.name)) {
+                this.presets.set(preset.name, {
+                    ...preset,
+                    savedAt: new Date()
+                });
+                importedCount++;
+            }
+        }
+
+        if (importedCount > 0) {
+            await this.persistPresets();
+            this.broadcast({
+                type: 'PRESET_LIST',
+                data: { presets: this.getPresets() }
+            });
+        }
+
+        return { success: true, count: importedCount };
     }
 
     /**

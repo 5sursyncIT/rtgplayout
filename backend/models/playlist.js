@@ -4,7 +4,13 @@
  * Manages a single active playlist with timing calculations
  */
 
-const { computeSchedule } = require('../utils/timing');
+const {
+    computeScheduleRobust,
+    validateHardStarts,
+    calculateHardStartTarget,
+    parseHardStartTime,
+    FRAME_RATES
+} = require('../utils/timingRobust');
 
 class PlaylistModel {
     constructor() {
@@ -112,15 +118,25 @@ class PlaylistModel {
     }
 
     /**
-     * Get the playlist with calculated start/end times
-     * 
+     * Get the playlist with calculated start/end times (ROBUST version)
+     *
+     * @param {Object} options - Options de calcul
      * @returns {Object} - Playlist with scheduled items
      */
-    getScheduled() {
+    getScheduled(options = {}) {
+        // Clean orphaned trim values before scheduling
+        // (trim values without hard start constraints)
+        this.cleanOrphanedTrims();
+
         // Use current time if baseStartAt is null
         const baseDate = this.baseStartAt || new Date();
 
-        const scheduledItems = computeSchedule(this.items, baseDate);
+        // Utiliser la version robuste avec frame-accuracy
+        const scheduledItems = computeScheduleRobust(this.items, baseDate, {
+            frameRate: options.frameRate || FRAME_RATES.PAL,
+            frameAccurate: options.frameAccurate !== false, // true par défaut
+            validateHardStartsFirst: options.validateHardStartsFirst !== false
+        });
 
         return {
             id: this.id,
@@ -152,106 +168,139 @@ class PlaylistModel {
     }
 
     /**
-     * Recalculate schedule with hard start time constraints
+     * Recalculate schedule with hard start time constraints (VERSION ROBUSTE)
      * Adjusts previous item durations if needed to respect hard start times
      * @returns {Object} - Result object with success status and errors
      */
     recalculateWithHardStart() {
-        // Find items with hard start times
-        const hardStartItems = this.items
-            .map((item, index) => ({ item, index }))
-            .filter(({ item }) => item.hardStartTime);
+        // Utiliser la validation robuste des hard starts
+        const baseDate = this.baseStartAt || new Date();
+        const validation = validateHardStarts(this.items, baseDate);
 
-        if (hardStartItems.length === 0) {
+        if (!validation.valid) {
+            console.error('[HARD START] Validation failed:', validation.errors);
+            return {
+                success: false,
+                errors: validation.errors
+            };
+        }
+
+        // Pas de hard starts = succès immédiat
+        if (!validation.hardStartTargets || validation.hardStartTargets.length === 0) {
             return { success: true, errors: [] };
         }
 
         const errors = [];
+        const adjustments = [];
 
-        // For each item with hard start time
-        hardStartItems.forEach(({ item, index }) => {
+        // Pour chaque hard start validé
+        validation.hardStartTargets.forEach(({ index, itemId, itemName, scheduledStart, targetStart, diff }) => {
             if (index === 0) {
                 errors.push({
-                    itemId: item.id,
-                    itemName: item.name,
+                    itemId,
+                    itemName,
                     reason: 'Cannot apply hard start to first item'
                 });
                 return;
             }
 
-            // Parse hard start time (HH:MM:SS)
-            const [hours, minutes, seconds] = item.hardStartTime.split(':').map(Number);
+            const item = this.items[index];
+            const diffSeconds = diff / 1000;
 
-            // Calculate scheduled start time of current item first
-            const baseDate = this.baseStartAt || new Date();
-            let cumulativeSeconds = 0;
-            for (let i = 0; i < index; i++) {
-                cumulativeSeconds += this.items[i].durationSeconds;
-            }
-            const scheduledStart = new Date(baseDate.getTime() + cumulativeSeconds * 1000);
-
-            // Create target start based on scheduled date (not current date)
-            const targetStart = new Date(scheduledStart);
-            targetStart.setHours(hours, minutes, seconds || 0, 0);
-
-            // Calculate difference
-            // If target is more than 12 hours away, assume day wrap
-            // e.g. Sched 23:50, Target 00:10 -> Diff is -23h40m -> Add day to target -> Diff +20m
-            // e.g. Sched 00:10, Target 23:50 -> Diff is +23h40m -> Subtract day from target -> Diff -20m
-            
-            let timeDiffSeconds = (targetStart - scheduledStart) / 1000;
-
-            if (timeDiffSeconds > 12 * 3600) {
-                targetStart.setDate(targetStart.getDate() - 1);
-                timeDiffSeconds = (targetStart - scheduledStart) / 1000;
-            } else if (timeDiffSeconds < -12 * 3600) {
-                targetStart.setDate(targetStart.getDate() + 1);
-                timeDiffSeconds = (targetStart - scheduledStart) / 1000;
-            }
-
-            if (timeDiffSeconds < 0) {
-                // We're running late - need to trim previous item(s)
-                const trimNeeded = Math.abs(timeDiffSeconds);
-
-                // Adjust the immediately previous item
+            if (diffSeconds < 0) {
+                // En retard - besoin de trim
+                const trimNeeded = Math.abs(diffSeconds);
                 const prevItem = this.items[index - 1];
-                const maxTrim = prevItem.durationSeconds - 10; // Keep at least 10 seconds
+
+                // Sécurité: garder au moins 5 secondes + trim déjà existant
+                const currentDuration = prevItem.durationSeconds;
+                const existingTrimOut = prevItem.trimOutSeconds || 0;
+                const maxTrim = Math.max(0, currentDuration - 5);
 
                 if (trimNeeded <= maxTrim) {
-                    // Adjust duration by setting trimOutSeconds
+                    // Ajuster la durée
                     prevItem.durationSeconds -= trimNeeded;
-                    prevItem.trimOutSeconds = (prevItem.trimOutSeconds || 0) + trimNeeded;
-                    console.log(`[HARD START] "${item.name}" @ ${item.hardStartTime}: trimmed ${Math.round(trimNeeded)}s from previous item`);
+                    prevItem.trimOutSeconds = existingTrimOut + trimNeeded;
+
+                    adjustments.push({
+                        type: 'trim',
+                        itemId: prevItem.id,
+                        itemName: prevItem.name,
+                        amount: trimNeeded,
+                        reason: `Hard start "${itemName}" @ ${item.hardStartTime}`
+                    });
+
+                    console.log(`[HARD START] ✓ Trimmed ${trimNeeded.toFixed(3)}s from "${prevItem.name}" for hard start "${itemName}" @ ${item.hardStartTime}`);
                 } else {
-                    const errorMsg = `Cannot trim ${Math.round(trimNeeded)}s from previous item (max: ${Math.round(maxTrim)}s)`;
-                    console.error(`[HARD START] "${item.name}" @ ${item.hardStartTime}: ${errorMsg}`);
+                    const errorMsg = `Cannot trim ${trimNeeded.toFixed(1)}s from previous item (max: ${maxTrim.toFixed(1)}s)`;
+                    console.error(`[HARD START] ✗ "${itemName}" @ ${item.hardStartTime}: ${errorMsg}`);
+
                     errors.push({
-                        itemId: item.id,
-                        itemName: item.name,
+                        itemId,
+                        itemName,
                         hardStartTime: item.hardStartTime,
                         reason: errorMsg,
-                        trimNeeded: Math.round(trimNeeded),
-                        maxTrim: Math.round(maxTrim)
+                        trimNeeded: Math.round(trimNeeded * 1000) / 1000,
+                        maxTrim: Math.round(maxTrim * 1000) / 1000,
+                        scheduledStart: scheduledStart.toISOString(),
+                        targetStart: targetStart.toISOString()
                     });
                 }
-            } else if (timeDiffSeconds > 0) {
-                // We're running early - extend previous item to fill the gap
-                const extendNeeded = timeDiffSeconds;
+            } else if (diffSeconds > 0) {
+                // En avance - étendre l'item précédent (créer un gap/hold)
+                const extendNeeded = diffSeconds;
                 const prevItem = this.items[index - 1];
-                
-                // Allow extending beyond original duration (negative trimOut)
-                // This effectively creates a "hold" or "gap" after the item finishes
+
                 prevItem.durationSeconds += extendNeeded;
                 prevItem.trimOutSeconds = (prevItem.trimOutSeconds || 0) - extendNeeded;
-                
-                console.log(`[HARD START] "${item.name}" @ ${item.hardStartTime}: extended previous item by ${Math.round(extendNeeded)}s (added gap/hold)`);
+
+                adjustments.push({
+                    type: 'extend',
+                    itemId: prevItem.id,
+                    itemName: prevItem.name,
+                    amount: extendNeeded,
+                    reason: `Hard start "${itemName}" @ ${item.hardStartTime}`
+                });
+
+                console.log(`[HARD START] ✓ Extended "${prevItem.name}" by ${extendNeeded.toFixed(3)}s (gap/hold) for hard start "${itemName}" @ ${item.hardStartTime}`);
+            } else {
+                // Parfait timing - pas d'ajustement
+                console.log(`[HARD START] ✓ "${itemName}" @ ${item.hardStartTime} is perfectly timed (no adjustment needed)`);
             }
         });
 
         return {
             success: errors.length === 0,
-            errors: errors
+            errors,
+            adjustments,
+            hardStartCount: validation.hardStartTargets.length
         };
+    }
+
+    /**
+     * Clean orphaned trim values (trim without hard start)
+     * This removes trim values that don't make sense without a hard start constraint
+     */
+    cleanOrphanedTrims() {
+        let cleanedCount = 0;
+
+        this.items.forEach((item, index) => {
+            // If item has NO hard start but has suspicious trim values
+            if (!item.hardStartTime) {
+                // Reset excessive trim values that are likely orphaned from removed hard starts
+                if (Math.abs(item.trimOutSeconds || 0) > item.durationSeconds * 0.5) {
+                    console.log(`[PLAYLIST] Cleaning orphaned trim on "${item.name}": ${item.trimOutSeconds}s → 0s`);
+                    item.trimOutSeconds = 0;
+                    cleanedCount++;
+                }
+            }
+        });
+
+        if (cleanedCount > 0) {
+            console.log(`[PLAYLIST] Cleaned ${cleanedCount} orphaned trim value(s)`);
+        }
+
+        return cleanedCount;
     }
 
     /**

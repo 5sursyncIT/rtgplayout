@@ -13,6 +13,15 @@ class CasparClient extends EventEmitter {
         this.socket = null;
         this.connected = false;
         this.buffer = '';
+        this.reconnectTimer = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 10;
+        this.reconnectDelay = 5000; // 5 secondes
+        this.pendingCommands = new Map(); // Track pending commands
+        this.commandTimeout = 5000; // 5 secondes timeout
+
+        // Éviter trop de listeners (augmenter la limite)
+        this.setMaxListeners(50);
     }
 
     /**
@@ -20,13 +29,30 @@ class CasparClient extends EventEmitter {
      */
     connect() {
         return new Promise((resolve, reject) => {
+            // Nettoyer l'ancienne socket si elle existe
+            if (this.socket) {
+                this.socket.removeAllListeners();
+                this.socket.destroy();
+                this.socket = null;
+            }
+
             console.log(`[CASPAR] Connecting to ${this.host}:${this.port}...`);
 
             this.socket = new net.Socket();
+            this.socket.setKeepAlive(true, 10000); // Keepalive toutes les 10s
+            this.socket.setTimeout(30000); // Timeout 30s pour inactivité
 
             this.socket.on('connect', () => {
                 console.log('[CASPAR] Connected to CasparCG Server');
                 this.connected = true;
+                this.reconnectAttempts = 0; // Reset compteur
+
+                // Annuler le timer de reconnexion si présent
+                if (this.reconnectTimer) {
+                    clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = null;
+                }
+
                 this.emit('connected');
                 resolve();
             });
@@ -35,21 +61,82 @@ class CasparClient extends EventEmitter {
                 this.handleData(data);
             });
 
+            this.socket.on('timeout', () => {
+                console.error('[CASPAR] Socket timeout - no activity for 30s');
+                this.socket.destroy();
+            });
+
             this.socket.on('error', (error) => {
                 console.error('[CASPAR] Socket error:', error.message);
                 this.connected = false;
                 this.emit('error', error);
-                reject(error);
+
+                // Ne pas rejeter si déjà connecté (gestion asynchrone)
+                if (!this.connected) {
+                    reject(error);
+                }
             });
 
-            this.socket.on('close', () => {
-                console.log('[CASPAR] Connection closed');
+            this.socket.on('close', (hadError) => {
+                console.log(`[CASPAR] Connection closed ${hadError ? '(with error)' : ''}`);
+                const wasConnected = this.connected;
                 this.connected = false;
+
+                // Rejeter toutes les commandes en attente
+                this.pendingCommands.forEach((cmdData, cmdId) => {
+                    if (cmdData.timeoutId) clearTimeout(cmdData.timeoutId);
+                    cmdData.reject(new Error('Connection closed'));
+                });
+                this.pendingCommands.clear();
+
                 this.emit('disconnected');
+
+                // Reconnexion automatique si c'était une perte de connexion
+                if (wasConnected) {
+                    this.scheduleReconnect();
+                }
+            });
+
+            // Timeout de connexion initiale (10s)
+            const connectionTimeout = setTimeout(() => {
+                if (!this.connected) {
+                    this.socket.destroy();
+                    reject(new Error('Connection timeout after 10s'));
+                }
+            }, 10000);
+
+            this.socket.once('connect', () => {
+                clearTimeout(connectionTimeout);
             });
 
             this.socket.connect(this.port, this.host);
         });
+    }
+
+    /**
+     * Planifier une reconnexion automatique
+     */
+    scheduleReconnect() {
+        if (this.reconnectTimer) return; // Déjà planifié
+
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.error('[CASPAR] Max reconnection attempts reached, giving up');
+            this.emit('reconnect-failed');
+            return;
+        }
+
+        this.reconnectAttempts++;
+        const delay = this.reconnectDelay * Math.min(this.reconnectAttempts, 3); // Backoff exponentiel (max 15s)
+
+        console.log(`[CASPAR] Reconnection attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay/1000}s...`);
+
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            this.connect().catch(err => {
+                console.error('[CASPAR] Reconnection failed:', err.message);
+                // scheduleReconnect sera appelé par le handler 'close'
+            });
+        }, delay);
     }
 
     /**
@@ -73,38 +160,69 @@ class CasparClient extends EventEmitter {
     }
 
     /**
-     * Send command to CasparCG
+     * Send command to CasparCG (version robuste sans fuite mémoire)
      */
     sendCommand(command) {
         return new Promise((resolve, reject) => {
-            if (!this.connected) {
+            if (!this.connected || !this.socket) {
                 return reject(new Error('Not connected to CasparCG'));
             }
 
             console.log('[CASPAR] Sending command:', command);
 
-            // Listen for response
+            // Générer un ID unique pour cette commande
+            const commandId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+
+            // Listen for response (avec cleanup automatique)
             const responseHandler = (response) => {
                 // Check if response is for this command
                 if (response.startsWith('2')) { // Success codes start with 2
-                    this.removeListener('response', responseHandler);
+                    cleanup();
                     resolve(response);
                 } else if (response.startsWith('4') || response.startsWith('5')) { // Error codes
-                    this.removeListener('response', responseHandler);
+                    cleanup();
                     reject(new Error(response));
                 }
             };
 
+            // Fonction de nettoyage pour éviter les fuites mémoire
+            const cleanup = () => {
+                this.removeListener('response', responseHandler);
+                const cmdData = this.pendingCommands.get(commandId);
+                if (cmdData && cmdData.timeoutId) {
+                    clearTimeout(cmdData.timeoutId);
+                }
+                this.pendingCommands.delete(commandId);
+            };
+
+            // Timeout avec cleanup
+            const timeoutId = setTimeout(() => {
+                cleanup();
+                reject(new Error('Command timeout after 5s'));
+            }, this.commandTimeout);
+
+            // Stocker la commande en attente
+            this.pendingCommands.set(commandId, {
+                command,
+                timeoutId,
+                resolve,
+                reject
+            });
+
             this.on('response', responseHandler);
 
-            // Send command
-            this.socket.write(command + '\r\n');
-
-            // Timeout after 5 seconds
-            setTimeout(() => {
-                this.removeListener('response', responseHandler);
-                reject(new Error('Command timeout'));
-            }, 5000);
+            // Send command (avec gestion d'erreur d'écriture)
+            try {
+                this.socket.write(command + '\r\n', (err) => {
+                    if (err) {
+                        cleanup();
+                        reject(new Error('Failed to write command: ' + err.message));
+                    }
+                });
+            } catch (error) {
+                cleanup();
+                reject(new Error('Socket write error: ' + error.message));
+            }
         });
     }
 
@@ -306,11 +424,48 @@ class CasparClient extends EventEmitter {
      * Disconnect from CasparCG
      */
     disconnect() {
+        // Annuler la reconnexion automatique
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+
+        // Rejeter toutes les commandes en attente
+        this.pendingCommands.forEach((cmdData, cmdId) => {
+            if (cmdData.timeoutId) clearTimeout(cmdData.timeoutId);
+            cmdData.reject(new Error('Client disconnected'));
+        });
+        this.pendingCommands.clear();
+
         if (this.socket) {
+            this.socket.removeAllListeners();
             this.socket.destroy();
+            this.socket = null;
             this.connected = false;
             console.log('[CASPAR] Disconnected');
         }
+    }
+
+    /**
+     * Vérifier l'état de santé de la connexion
+     */
+    isHealthy() {
+        return this.connected &&
+               this.socket &&
+               !this.socket.destroyed &&
+               this.socket.readyState === 'open';
+    }
+
+    /**
+     * Obtenir des statistiques de connexion
+     */
+    getStats() {
+        return {
+            connected: this.connected,
+            reconnectAttempts: this.reconnectAttempts,
+            pendingCommands: this.pendingCommands.size,
+            socketState: this.socket ? this.socket.readyState : 'no socket'
+        };
     }
 }
 

@@ -30,6 +30,7 @@ const AutoplayScheduler = require('./scheduler/autoplayScheduler');
 
 const logger = require('./utils/logger');
 const ErrorHandler = require('./utils/errorHandler');
+const AsRunLogger = require('./utils/asRunLogger');
 
 const WS_PORT = 8080;
 const HTTP_PORT = 3000;
@@ -63,6 +64,9 @@ let errorHandler = null;
 
 // Media folders instance
 let mediaFolders = null;
+
+// As-Run logger instance
+let asRunLogger = null;
 
 // Get local IP address
 function getLocalIP() {
@@ -223,6 +227,7 @@ async function initializeCaspar() {
     if (!templateController) {
         const baseUrl = `http://${localIP}:${HTTP_PORT}`;
         templateController = new TemplateController(casparClient, broadcast, baseUrl);
+        await templateController.initialize(); // Load presets and sync with CasparCG
         logger.info('[TEMPLATE] Template controller initialized');
     } else {
         // Update client reference in existing controller to preserve presets/state
@@ -235,6 +240,11 @@ async function initializeCaspar() {
         const version = await casparClient.version();
         logger.info(`[CASPAR] Connected successfully: ${version}`);
         casparConnected = true;
+
+        // Now that CasparCG is connected, sync templates
+        if (templateController) {
+            await templateController.syncWithCaspar();
+        }
     } catch (error) {
         logger.error('[CASPAR] Connection failed:', error.message);
         logger.info('[CASPAR] Will retry on first PLAY command');
@@ -249,62 +259,109 @@ async function autoSavePlaylist() {
 }
 
 /**
- * Broadcast message to all connected clients
+ * Broadcast message to all connected clients (version robuste)
  */
 function broadcast(message) {
-    const messageStr = JSON.stringify(message);
+    if (!message || !message.type) {
+        logger.error('[WS] Attempted to broadcast invalid message');
+        return;
+    }
+
+    let messageStr;
+    try {
+        messageStr = JSON.stringify(message);
+    } catch (error) {
+        logger.error('[WS] Failed to serialize broadcast message:', error.message);
+        return;
+    }
+
     let sentCount = 0;
+    let errorCount = 0;
 
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
-            client.send(messageStr);
-            sentCount++;
+            try {
+                client.send(messageStr, (error) => {
+                    if (error) {
+                        errorCount++;
+                        logger.error('[WS] Send error to client:', error.message);
+                    }
+                });
+                sentCount++;
+            } catch (error) {
+                errorCount++;
+                logger.error('[WS] Exception during send:', error.message);
+            }
         }
     });
 
     // Don't log every broadcast to avoid clutter, only important ones
     if (message.type !== 'PLAYBACK_STATUS' && message.type !== 'AUTOPLAY_STATUS') {
-        logger.info(`[WS] Broadcast to ${sentCount} client(s): ${message.type}`);
+        logger.info(`[WS] Broadcast to ${sentCount} client(s): ${message.type}${errorCount > 0 ? ` (${errorCount} errors)` : ''}`);
     }
 }
 
 /**
- * Send playlist to a specific client
+ * Send playlist to a specific client (version robuste)
  */
 function sendPlaylist(ws, type = 'PLAYLIST_FULL') {
-    const scheduled = playlist.getScheduled();
-    const message = {
-        type,
-        data: scheduled
-    };
+    try {
+        const scheduled = playlist.getScheduled();
+        const message = {
+            type,
+            data: scheduled
+        };
 
-    ws.send(JSON.stringify(message));
-    logger.info(`[WS] Sent ${type} to client`);
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(message), (error) => {
+                if (error) {
+                    logger.error(`[WS] Failed to send ${type}:`, error.message);
+                }
+            });
+            logger.info(`[WS] Sent ${type} to client`);
+        } else {
+            logger.warn(`[WS] Cannot send ${type}, client not connected`);
+        }
+    } catch (error) {
+        logger.error(`[WS] Error in sendPlaylist:`, error.message);
+    }
 }
 
 /**
- * Send media library to a specific client
+ * Send media library to a specific client (version robuste)
  */
 function sendMediaLibrary(ws) {
-    // Enrich media files with folder information
-    const enrichedFiles = mediaLibrary.map(media => {
-        const folderId = mediaFolders ? mediaFolders.getFolderForMedia(media.file) : 1;
-        return {
-            ...media,
-            folderId
+    try {
+        // Enrich media files with folder information
+        const enrichedFiles = mediaLibrary.map(media => {
+            const folderId = mediaFolders ? mediaFolders.getFolderForMedia(media.file) : 1;
+            return {
+                ...media,
+                folderId
+            };
+        });
+
+        const message = {
+            type: 'MEDIA_LIBRARY',
+            data: {
+                files: enrichedFiles,
+                isScanning: isScanning
+            }
         };
-    });
 
-    const message = {
-        type: 'MEDIA_LIBRARY',
-        data: {
-            files: enrichedFiles,
-            isScanning: isScanning
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(message), (error) => {
+                if (error) {
+                    logger.error('[WS] Failed to send MEDIA_LIBRARY:', error.message);
+                }
+            });
+            logger.info(`[WS] Sent MEDIA_LIBRARY to client (${mediaLibrary.length} files)`);
+        } else {
+            logger.warn('[WS] Cannot send MEDIA_LIBRARY, client not connected');
         }
-    };
-
-    ws.send(JSON.stringify(message));
-    logger.info(`[WS] Sent MEDIA_LIBRARY to client (${mediaLibrary.length} files)`);
+    } catch (error) {
+        logger.error('[WS] Error in sendMediaLibrary:', error.message);
+    }
 }
 
 /**
@@ -417,6 +474,10 @@ function handleMessage(ws, data) {
                 handlePresetDelete(message.data);
                 break;
 
+            case 'PRESET_IMPORT':
+                handlePresetImport(ws, message.data);
+                break;
+
             // Media folder messages
             case 'FOLDER_CREATE':
                 handleFolderCreate(message.data);
@@ -442,12 +503,32 @@ function handleMessage(ws, data) {
                 handleSetHardStart(message.data);
                 break;
 
+            case 'PLAYLIST_CLEAN_ORPHANED_TRIMS':
+                handleCleanOrphanedTrims();
+                break;
+
             case 'SECONDARY_EVENT_ADD':
                 handleSecondaryEventAdd(message.data);
                 break;
             
             case 'SECONDARY_EVENT_REMOVE':
                 handleSecondaryEventRemove(message.data);
+                break;
+
+            case 'HEALTH_CHECK':
+                handleHealthCheck(ws);
+                break;
+
+            case 'GET_SERVER_STATS':
+                handleGetServerStats(ws);
+                break;
+
+            case 'ASRUN_GET_LOGS':
+                handleAsRunGetLogs(ws, message.data);
+                break;
+
+            case 'ASRUN_GENERATE_REPORT':
+                handleAsRunGenerateReport(ws, message.data);
                 break;
 
             default:
@@ -639,6 +720,51 @@ async function handleSetHardStart(data) {
 }
 
 /**
+ * Handle PLAYLIST_CLEAN_ORPHANED_TRIMS
+ * Clean trim values that exist without hard start constraints
+ */
+async function handleCleanOrphanedTrims() {
+    try {
+        const cleanedCount = playlist.cleanOrphanedTrims();
+
+        if (cleanedCount > 0) {
+            logger.info(`[PLAYLIST] Cleaned ${cleanedCount} orphaned trim value(s)`);
+
+            await autoSavePlaylist();
+
+            broadcast({
+                type: 'PLAYLIST_UPDATED',
+                data: playlist.getScheduled()
+            });
+
+            broadcast({
+                type: 'NOTIFICATION',
+                data: {
+                    level: 'success',
+                    message: `Nettoyé ${cleanedCount} valeur(s) de trim orpheline(s)`
+                }
+            });
+
+            notifyPlaylistUpdate();
+        } else {
+            broadcast({
+                type: 'NOTIFICATION',
+                data: {
+                    level: 'info',
+                    message: 'Aucune valeur de trim orpheline trouvée'
+                }
+            });
+        }
+    } catch (error) {
+        logger.error('[PLAYLIST] Error cleaning orphaned trims:', error.message);
+        broadcast({
+            type: 'ERROR',
+            data: { message: `Échec du nettoyage: ${error.message}` }
+        });
+    }
+}
+
+/**
  * Handle SECONDARY_EVENT_ADD
  */
 async function handleSecondaryEventAdd(data) {
@@ -816,6 +942,8 @@ async function handleImportXML(data) {
  * Handle PLAY_ITEM message
  */
 async function handlePlayItem(data) {
+    const startTime = new Date();
+
     try {
         if (!casparConnected) {
             logger.info('[CASPAR] Not connected, attempting to connect...');
@@ -828,7 +956,7 @@ async function handlePlayItem(data) {
 
         // Find the item to check its type
         const item = playlist.items.find(i => i.id === data.id);
-        
+
         if (item && item.type === 'live') {
             logger.info(`[CASPAR] Playing Live Input: DECKLINK ${item.file}`);
             await casparClient.sendCommand(`PLAY ${CASPAR_CHANNEL}-${CASPAR_LAYER} DECKLINK ${item.file}`);
@@ -838,6 +966,17 @@ async function handlePlayItem(data) {
             const fileName = data.file.replace(/\.[^/.]+$/, '');
             await casparClient.play(CASPAR_CHANNEL, CASPAR_LAYER, fileName);
             logger.info(`[CASPAR] Now playing: ${fileName}`);
+        }
+
+        // Log As-Run start
+        if (asRunLogger && item) {
+            const scheduledTime = item.start || startTime;
+            await asRunLogger.logPlayStart(
+                data.id,
+                data.file,
+                scheduledTime,
+                startTime
+            );
         }
 
         // Reset retry count for this item if playback succeeds
@@ -861,11 +1000,17 @@ async function handlePlayItem(data) {
             data: {
                 itemId: data.id,
                 status: 'playing',
-                file: data.file
+                file: data.file,
+                startTime: startTime.toISOString()
             }
         });
     } catch (error) {
         logger.error('[CASPAR] Play failed:', error.message);
+
+        // Log As-Run error
+        if (asRunLogger) {
+            await asRunLogger.logPlayError(data.id, data.file, error);
+        }
 
         // Use ErrorHandler for retry/fallback
         if (errorHandler) {
@@ -887,8 +1032,11 @@ async function handlePlayItem(data) {
  * Handle STOP_PLAYBACK message
  */
 async function handleStopPlayback(data) {
+    logger.info('[STOP] handleStopPlayback called with data:', data);
+
     try {
         if (!casparConnected) {
+            logger.error('[STOP] CasparCG not connected');
             throw new Error('CasparCG not connected');
         }
 
@@ -897,6 +1045,11 @@ async function handleStopPlayback(data) {
         await casparClient.stop(CASPAR_CHANNEL, CASPAR_LAYER);
 
         logger.info('[CASPAR] Playback stopped');
+
+        // Log As-Run stop
+        if (asRunLogger && data.itemId) {
+            await asRunLogger.logPlayStop(data.itemId, data.file || 'unknown', data.reason || 'manual');
+        }
 
         // Sync autoplay scheduler state
         if (autoplayScheduler) {
@@ -1102,6 +1255,11 @@ async function handleTemplateLoadAndPlay(data) {
         const { channel, layer, templateName, templateData } = data;
         await templateController.loadAndPlay(channel, layer, templateName, templateData);
         logger.info(`[TEMPLATE] Loaded and played ${templateName} on ${channel}-${layer}`);
+
+        // Log As-Run template display
+        if (asRunLogger) {
+            await asRunLogger.logTemplateShow(templateName, channel, layer, templateData);
+        }
     } catch (error) {
         logger.error('[TEMPLATE] Load and play failed:', error.message);
         broadcast({
@@ -1216,6 +1374,28 @@ function handlePresetDelete(data) {
             type: 'ERROR',
             data: { message: `Preset delete failed: ${error.message}` }
         });
+    }
+}
+
+async function handlePresetImport(ws, data) {
+    try {
+        if (!templateController) {
+            throw new Error('Template controller not initialized');
+        }
+
+        const { presets, overwrite } = data;
+        const result = await templateController.importPresets(presets, overwrite);
+        logger.info(`[PRESET] Imported ${result.count} presets`);
+
+        ws.send(JSON.stringify({ type: 'PRESET_IMPORT_SUCCESS', count: result.count }));
+
+        broadcast({
+            type: 'PRESET_LIST',
+            data: { presets: templateController.getPresets() }
+        });
+    } catch (error) {
+        logger.error('[PRESET] Import failed:', error.message);
+        ws.send(JSON.stringify({ type: 'ERROR', message: error.message }));
     }
 }
 
@@ -1367,10 +1547,160 @@ function handleFolderGetAll(ws) {
     }
 }
 
+/**
+ * Health check handler
+ */
+function handleHealthCheck(ws) {
+    try {
+        const health = {
+            status: 'healthy',
+            timestamp: new Date().toISOString(),
+            uptime: process.uptime(),
+            caspar: {
+                connected: casparConnected,
+                healthy: casparClient ? casparClient.isHealthy() : false
+            },
+            websocket: {
+                clients: wss.clients.size
+            },
+            playlist: {
+                items: playlist.items.length
+            },
+            media: {
+                files: mediaLibrary.length,
+                scanning: isScanning
+            }
+        };
+
+        ws.send(JSON.stringify({
+            type: 'HEALTH_STATUS',
+            data: health
+        }));
+
+        logger.info('[HEALTH] Health check performed');
+    } catch (error) {
+        logger.error('[HEALTH] Health check failed:', error.message);
+    }
+}
+
+/**
+ * Server statistics handler
+ */
+function handleGetServerStats(ws) {
+    try {
+        const memUsage = process.memoryUsage();
+        const stats = {
+            uptime: process.uptime(),
+            memory: {
+                heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + ' MB',
+                heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024) + ' MB',
+                rss: Math.round(memUsage.rss / 1024 / 1024) + ' MB',
+                external: Math.round(memUsage.external / 1024 / 1024) + ' MB'
+            },
+            connections: {
+                websocket: wss.clients.size,
+                caspar: casparClient ? casparClient.getStats() : null
+            },
+            playlist: {
+                itemCount: playlist.items.length,
+                baseStartAt: playlist.baseStartAt
+            },
+            media: {
+                fileCount: mediaLibrary.length,
+                scanning: isScanning
+            },
+            autoplay: autoplayScheduler ? {
+                mode: autoplayScheduler.getMode(),
+                status: autoplayScheduler.getStatus()
+            } : null
+        };
+
+        ws.send(JSON.stringify({
+            type: 'SERVER_STATS',
+            data: stats
+        }));
+
+        logger.info('[STATS] Server stats sent to client');
+    } catch (error) {
+        logger.error('[STATS] Failed to get stats:', error.message);
+    }
+}
+
+/**
+ * As-Run Get Logs handler
+ */
+async function handleAsRunGetLogs(ws, data) {
+    try {
+        if (!asRunLogger) {
+            throw new Error('As-Run logger not initialized');
+        }
+
+        const { startDate, endDate } = data;
+        const logs = await asRunLogger.getLogs(
+            new Date(startDate),
+            endDate ? new Date(endDate) : new Date()
+        );
+
+        ws.send(JSON.stringify({
+            type: 'ASRUN_LOGS',
+            data: { logs, count: logs.length }
+        }));
+
+        logger.info(`[AS-RUN] Sent ${logs.length} log entries to client`);
+    } catch (error) {
+        logger.error('[AS-RUN] Failed to get logs:', error.message);
+        ws.send(JSON.stringify({
+            type: 'ERROR',
+            data: { message: `Failed to get As-Run logs: ${error.message}` }
+        }));
+    }
+}
+
+/**
+ * As-Run Generate Report handler
+ */
+async function handleAsRunGenerateReport(ws, data) {
+    try {
+        if (!asRunLogger) {
+            throw new Error('As-Run logger not initialized');
+        }
+
+        const date = data.date ? new Date(data.date) : new Date();
+        const result = await asRunLogger.generateDailyReport(date);
+
+        ws.send(JSON.stringify({
+            type: 'ASRUN_REPORT_GENERATED',
+            data: {
+                reportFile: result.reportFile,
+                stats: result.stats
+            }
+        }));
+
+        logger.info(`[AS-RUN] Daily report generated: ${result.reportFile}`);
+    } catch (error) {
+        logger.error('[AS-RUN] Failed to generate report:', error.message);
+        ws.send(JSON.stringify({
+            type: 'ERROR',
+            data: { message: `Failed to generate As-Run report: ${error.message}` }
+        }));
+    }
+}
+
 // WebSocket connection handler
 wss.on('connection', (ws, req) => {
     const clientIp = req.socket.remoteAddress;
     logger.info(`[WS] New client connected from ${clientIp}`);
+
+    // Heartbeat pour détecter les connexions mortes
+    ws.isAlive = true;
+    ws.on('pong', () => {
+        ws.isAlive = true;
+    });
+
+    // Handler pour les messages PING du client
+    ws.on('ping', () => {
+        ws.pong();
+    });
 
     sendPlaylist(ws, 'PLAYLIST_FULL');
     sendMediaLibrary(ws);
@@ -1440,6 +1770,31 @@ wss.on('error', (error) => {
     logger.error('[WS] Server error:', error.message);
 });
 
+// Heartbeat interval pour nettoyer les connexions mortes (30s)
+const heartbeatInterval = setInterval(() => {
+    let deadConnections = 0;
+
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            deadConnections++;
+            logger.warn('[WS] Terminating dead connection');
+            return ws.terminate();
+        }
+
+        ws.isAlive = false;
+        ws.ping();
+    });
+
+    if (deadConnections > 0) {
+        logger.info(`[WS] Cleaned ${deadConnections} dead connection(s)`);
+    }
+}, 30000);
+
+// Nettoyer l'interval lors de la fermeture du serveur
+wss.on('close', () => {
+    clearInterval(heartbeatInterval);
+});
+
 // Initialize media folders
 async function initializeMediaFolders() {
     mediaFolders = new MediaFolders();
@@ -1469,6 +1824,15 @@ async function startServer() {
     await initializeCaspar();
     await initializeMediaFolders();
 
+    // Initialize As-Run logger
+    asRunLogger = new AsRunLogger();
+    await asRunLogger.initialize();
+    await asRunLogger.logSystemEvent('SERVER_START', {
+        version: '1.0.0',
+        ip: localIP,
+        ports: { http: HTTP_PORT, ws: WS_PORT }
+    });
+
     // Initialize error handler
     errorHandler = new ErrorHandler(casparClient, broadcast);
     logger.info('[ERROR] Error handler initialized');
@@ -1495,6 +1859,149 @@ async function startServer() {
         }
     }, 2000);
 }
+
+// ========================================
+// PRODUCTION ERROR HANDLERS
+// ========================================
+
+// Handler pour les erreurs non catchées (évite les crashes)
+process.on('uncaughtException', (error) => {
+    logger.error('[PROCESS] Uncaught Exception:', error);
+    logger.error(error.stack);
+
+    // Notification broadcast aux clients
+    broadcast({
+        type: 'CRITICAL_ERROR',
+        data: {
+            message: 'Server encountered critical error',
+            details: error.message
+        }
+    });
+
+    // En production, on essaie de continuer (sauf erreurs fatales)
+    // Pour les erreurs fatales, on redémarre proprement
+    if (error.code === 'EADDRINUSE' || error.code === 'EACCES') {
+        logger.error('[PROCESS] Fatal error - shutting down');
+        gracefulShutdown(1);
+    }
+});
+
+// Handler pour les promesses rejetées non gérées
+process.on('unhandledRejection', (reason, promise) => {
+    logger.error('[PROCESS] Unhandled Rejection at:', promise);
+    logger.error('[PROCESS] Reason:', reason);
+
+    // Log mais ne pas crasher
+    broadcast({
+        type: 'ERROR',
+        data: {
+            message: 'Unhandled promise rejection',
+            details: String(reason)
+        }
+    });
+});
+
+// Handler pour SIGINT (Ctrl+C)
+process.on('SIGINT', () => {
+    logger.info('[PROCESS] Received SIGINT, shutting down gracefully...');
+    gracefulShutdown(0);
+});
+
+// Handler pour SIGTERM (kill)
+process.on('SIGTERM', () => {
+    logger.info('[PROCESS] Received SIGTERM, shutting down gracefully...');
+    gracefulShutdown(0);
+});
+
+/**
+ * Arrêt propre du serveur
+ */
+async function gracefulShutdown(exitCode = 0) {
+    logger.info('[SERVER] Starting graceful shutdown...');
+
+    // 1. Arrêter d'accepter de nouvelles connexions
+    try {
+        httpServer.close(() => {
+            logger.info('[HTTP] Server closed');
+        });
+    } catch (error) {
+        logger.error('[HTTP] Error closing server:', error.message);
+    }
+
+    // 2. Fermer les connexions WebSocket
+    try {
+        wss.clients.forEach((ws) => {
+            try {
+                ws.send(JSON.stringify({
+                    type: 'SERVER_SHUTDOWN',
+                    data: { message: 'Server is shutting down' }
+                }));
+                ws.close();
+            } catch (error) {
+                // Ignorer les erreurs de fermeture
+            }
+        });
+        wss.close(() => {
+            logger.info('[WS] WebSocket server closed');
+        });
+    } catch (error) {
+        logger.error('[WS] Error closing WebSocket server:', error.message);
+    }
+
+    // 3. Sauvegarder la playlist
+    try {
+        const playlistData = playlist.getRaw();
+        await savePlaylist(playlistData);
+        logger.info('[PLAYLIST] Final save completed');
+    } catch (error) {
+        logger.error('[PLAYLIST] Error during final save:', error.message);
+    }
+
+    // 4. Déconnecter CasparCG
+    try {
+        if (casparClient) {
+            casparClient.disconnect();
+            logger.info('[CASPAR] Disconnected');
+        }
+    } catch (error) {
+        logger.error('[CASPAR] Error disconnecting:', error.message);
+    }
+
+    // 5. Arrêter l'autoplay scheduler
+    try {
+        if (autoplayScheduler) {
+            autoplayScheduler.stop();
+            logger.info('[AUTOPLAY] Scheduler stopped');
+        }
+    } catch (error) {
+        logger.error('[AUTOPLAY] Error stopping scheduler:', error.message);
+    }
+
+    // 6. Arrêter l'As-Run logger et générer rapport final
+    try {
+        if (asRunLogger) {
+            await asRunLogger.logSystemEvent('SERVER_SHUTDOWN', {
+                reason: exitCode === 0 ? 'graceful' : 'error',
+                uptime: process.uptime()
+            });
+            await asRunLogger.stop();
+            logger.info('[AS-RUN] Logger stopped and flushed');
+        }
+    } catch (error) {
+        logger.error('[AS-RUN] Error stopping logger:', error.message);
+    }
+
+    logger.info('[SERVER] Graceful shutdown complete');
+
+    // Attendre un peu pour que les logs soient écrits
+    setTimeout(() => {
+        process.exit(exitCode);
+    }, 1000);
+}
+
+// ========================================
+// START SERVER
+// ========================================
 
 startServer().catch(error => {
     logger.error('[SERVER] Fatal error during startup:', error);

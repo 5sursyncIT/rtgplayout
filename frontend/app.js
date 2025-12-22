@@ -188,6 +188,10 @@ function handleMessage(message) {
             // Presets will be sent via PRESET_LIST
             break;
 
+        case 'PRESET_IMPORT_SUCCESS':
+            showNotification('success', `${message.count} presets importés avec succès`);
+            break;
+
         case 'PRESET_LIST':
             presets = message.data.presets || [];
             renderPresets();
@@ -640,11 +644,16 @@ function playItem(id, file) {
  * Stop playback on CasparCG
  */
 function stopPlayback() {
+    console.log('[STOP] Stop button clicked');
+
     if (confirm('Arrêter la diffusion en cours ?')) {
+        console.log('[STOP] User confirmed, sending STOP_PLAYBACK message');
         sendMessage({
             type: 'STOP_PLAYBACK',
             data: {}
         });
+    } else {
+        console.log('[STOP] User cancelled');
     }
 }
 
@@ -1016,7 +1025,14 @@ function stopCountdown() {
 addItemBtn.addEventListener('click', addItem);
 scanBtn.addEventListener('click', scanMedia);
 clearPlaylistBtn.addEventListener('click', clearPlaylist);
-stopPlaybackBtn.addEventListener('click', stopPlayback);
+
+if (stopPlaybackBtn) {
+    console.log('[INIT] stopPlaybackBtn found, attaching listener');
+    stopPlaybackBtn.addEventListener('click', stopPlayback);
+} else {
+    console.error('[INIT] stopPlaybackBtn NOT FOUND!');
+}
+
 autoModeBtn.addEventListener('click', toggleAutoplayMode);
 
 // Allow Enter key to add item
@@ -1208,6 +1224,63 @@ cancelPresetBtn.addEventListener('click', () => {
 closePresetModal.addEventListener('click', () => {
     presetModal.style.display = 'none';
 });
+
+/**
+ * Preset Import/Export
+ */
+const exportPresetsBtn = document.getElementById('exportPresetsBtn');
+const importPresetsBtn = document.getElementById('importPresetsBtn');
+const importPresetsInput = document.getElementById('importPresetsInput');
+
+if (exportPresetsBtn) {
+    exportPresetsBtn.addEventListener('click', () => {
+        if (presets.length === 0) {
+            showNotification('info', 'Aucun preset à exporter');
+            return;
+        }
+
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(presets, null, 2));
+        const downloadAnchorNode = document.createElement('a');
+        downloadAnchorNode.setAttribute("href", dataStr);
+        downloadAnchorNode.setAttribute("download", "rtg_presets_" + new Date().toISOString().slice(0, 10) + ".json");
+        document.body.appendChild(downloadAnchorNode); // required for firefox
+        downloadAnchorNode.click();
+        downloadAnchorNode.remove();
+    });
+}
+
+if (importPresetsBtn && importPresetsInput) {
+    importPresetsBtn.addEventListener('click', () => {
+        importPresetsInput.click();
+    });
+
+    importPresetsInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const importedPresets = JSON.parse(event.target.result);
+                if (!Array.isArray(importedPresets)) {
+                    throw new Error('Format invalide (doit être un tableau)');
+                }
+
+                if (confirm(`Importer ${importedPresets.length} presets ? Cela écrasera les presets existants portant le même nom.`)) {
+                    sendTemplateCommand('PRESET_IMPORT', { 
+                        presets: importedPresets,
+                        overwrite: true 
+                    });
+                }
+            } catch (err) {
+                showNotification('error', 'Erreur de lecture du fichier: ' + err.message);
+            }
+            // Reset input so same file can be selected again
+            importPresetsInput.value = '';
+        };
+        reader.readAsText(file);
+    });
+}
 
 /**
  * Toggle graphics panel
